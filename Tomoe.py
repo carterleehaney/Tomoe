@@ -2,7 +2,7 @@ import argparse
 import logging
 
 from smb import run_psexec
-from winrm import run_winrm
+from wsman import run_winrm
 
 
 if __name__ == "__main__":
