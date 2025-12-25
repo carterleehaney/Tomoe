@@ -47,7 +47,7 @@ def parse_target_or_file(value: str) -> list[str]:
 
 def create_status_table(host_statuses: dict[str, HostStatus]) -> Table:
     """Create a Rich table showing current status of all hosts."""
-    table = Table(title="Tomoe - Execution Status")
+    table = Table(title="Tomoe")
     table.add_column("Host", style="cyan", no_wrap=True)
     table.add_column("Status", style="bold")
     table.add_column("Username", style="magenta")
@@ -128,12 +128,12 @@ def execute_on_host(
                     )
                 
                 # Success!
-                update_status("success", username, "Command executed")
+                update_status("success", username, "Command executed.")
                 return HostResult(
                     host=host,
                     success=True,
                     username=username,
-                    message="Command executed successfully",
+                    message="Command executed successfully.",
                     output=output
                 )
                 
@@ -161,11 +161,11 @@ def execute_on_host(
                     )
     
     # All credentials exhausted.
-    update_status("failed", "-", "All credentials failed")
+    update_status("failed", "-", "Invalid credentials.")
     return HostResult(
         host=host,
         success=False,
-        message="All credential combinations failed."
+        message="Invalid credentials."
     )
 
 
@@ -261,7 +261,7 @@ def run_concurrent_execution(
 
 def print_results(results: list[HostResult], console: Console):
     """Print final results after execution."""
-    console.print("\n[bold]═══ Execution Results ═══[/bold]\n")
+    console.print("\nExecution Results\n")
     
     for result in results:
         if result.success:
@@ -270,6 +270,7 @@ def print_results(results: list[HostResult], console: Console):
                 console.print(f"  [dim]Output:[/dim]")
                 for line in result.output.strip().split('\n'):
                     console.print(f"    {line}")
+                console.print()
         else:
             console.print(f"[red]✗[/red] [cyan]{result.host}[/cyan] - Failed: {result.message}")
     
@@ -314,10 +315,10 @@ if __name__ == "__main__":
     passwords = parse_target_or_file(args.password)
     
     console = Console()
-    console.print(f"[bold]Tomoe[/bold] - Multi-host Execution")
+    console.print()
     console.print(f"  Targets: {len(hosts)} host(s)")
     console.print(f"  Credentials: {len(usernames)} user(s) x {len(passwords)} password(s)")
-    console.print(f"  Protocol: {args.protocol.upper()}")
+    console.print(f"  Protocol: {args.protocol}")
     console.print()
 
     # Run concurrent execution.
