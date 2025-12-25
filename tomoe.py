@@ -139,7 +139,7 @@ def execute_on_host(
                 
             except Exception as e:
                 error_msg = str(e).lower()
-                # Check if it's an authentication error - try next credential. This might need to inclue more in the future.
+                # Check if it's an authentication error - try next credential. This might need to include more in the future.
                 auth_error_patterns = [
                     "logon_failure", "access_denied", "authentication", 
                     "login failed", "invalid credentials", "unauthorized",
@@ -148,7 +148,7 @@ def execute_on_host(
                     "rejected", "401"
                 ]
                 if any(auth_err in error_msg for auth_err in auth_error_patterns):
-                    update_status("trying", username, f"Auth failed, trying next...")
+                    update_status("trying", username, f"Authentication failed, trying next.")
                     continue
                 else:
                     # Non-auth error - report and stop trying this host.
