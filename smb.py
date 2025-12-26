@@ -3,7 +3,7 @@ import os
 import re
 import logging
 import time
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 import random
 import string
 from six import PY3
@@ -66,33 +66,16 @@ def openPipe(s, tid, pipe, accessMask):
 def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False):
     """
     Execute a command or script remotely using impacket's psexec functionality over SMB.
+    Simplified to match the original psexec.py approach.
     """
-    remote_name = None  # Initialize before try block for exception handler scope
+    remote_name = None
+    unInstalled = False
 
-    # if script_path:
-    #     if verbose:
-    #         print(f"[*] Reading local script: {script_path}")
-    #     copy_file = script_path
-    #     # Pass args as a named parameter to the script, quoted properly
-    #     if script_args:
-    #         cmd_args = f"{script_args}"
-    #     else:
-    #         cmd_args = ""
-    # elif command:
-    #     if verbose:
-    #         print(f"[*] Executing command: {command}")
-    #     copy_file = None
-    #     cmd_args = f'powershell.exe -Command "{command}"'
-    # else:
-    #     raise ValueError("Either --script or --command must be provided")
-
-    # Set up logging
     if verbose:
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.INFO, force=True)
     else:
-        logging.basicConfig(level=logging.CRITICAL)
+        logging.disable(logging.CRITICAL)
 
-    # Create string binding for RPC transport
     stringbinding = r'ncacn_np:%s[\pipe\svcctl]' % target_ip
     if verbose:
         logging.debug(f'StringBinding {stringbinding}')
@@ -101,11 +84,9 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
     rpctransport.set_dport(445)
     rpctransport.setRemoteHost(target_ip)
     
-    # Set credentials
     if hasattr(rpctransport, 'set_credentials'):
         rpctransport.set_credentials(username, password, domain, '', '')
 
-    # Get DCE RPC connection
     dce = rpctransport.get_dce_rpc()
     
     try:
@@ -122,37 +103,33 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         global dialect
         dialect = s.getDialect()
         
-        installService = serviceinstall.ServiceInstall(s, remcomsvc.RemComSvc(), "TomoeService", "TomoeSMB.exe")
+        # Use dynamic service name to avoid conflicts
+        service_name = f"TomoeService_{random.randint(10000, 99999)}"
+        installService = serviceinstall.ServiceInstall(s, remcomsvc.RemComSvc(), service_name, "TomoeSMB.exe")
+        if verbose:
+            logging.info(f"Using service name: {service_name}")
 
-        # Clean up any existing service from previous run
+        # Clean up any existing service
         if verbose:
             logging.info("Checking for existing TomoeService...")
         try:
             installService.uninstall()
-            time.sleep(2)  # Wait for service to fully stop and remove
-            if verbose:
-                logging.info("Cleaned up old service")
-        except Exception as e:
-            if verbose:
-                logging.info(f"No existing service to clean up")
+            time.sleep(2)
+        except:
             pass
 
-        # Now install fresh
         if verbose:
             logging.info("Installing fresh TomoeService...")
         if not installService.install():
             raise Exception("Failed to install service")
 
-        # For PowerShell commands
+        # Build command
         if command:
-            # Don't wrap in extra quotes - cmd.exe will handle it
             cmd_args = f'powershell.exe -NoProfile -NonInteractive -Command {command}'
-        
-        # For PowerShell scripts
         elif script_path:
             with open(script_path, "rb") as fh:
                 remote_name = f"Windows\\Temp\\{os.path.basename(script_path)}"
-                s.putFile(installService.getShare(), remote_name, fh.read)  # callback, no ()
+                s.putFile(installService.getShare(), remote_name, fh.read)
             cmd_args = f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\\Windows\\Temp\\{os.path.basename(script_path)}" {script_args}'
         else:
             raise ValueError("Either command or script_path is required")
@@ -160,21 +137,21 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         if verbose:
             logging.info(f"Command to execute: {cmd_args}")
 
-        # Connect to IPC$ share and open RemCom communication pipe
+        # Open communication pipe
         tid = s.connectTree('IPC$')
         fid_main = openPipe(s, tid, r'\RemCom_communicaton', 0x12019f)
 
+        # Create packet with command
         packet = RemComMessage()
-        pid = os.getpid()
         packet['Machine'] = ''.join([random.choice(string.ascii_letters) for _ in range(4)])
         packet['WorkingDir'] = ''
         packet['Command'] = cmd_args
-        packet['ProcessID'] = pid
+        packet['ProcessID'] = os.getpid()
 
-        # Start pipe threads BEFORE sending command - they will wait for pipes to appear
         if verbose:
             logging.info("Starting pipe threads...")
 
+        # Start pipes - they'll print output directly
         stdin_pipe = RemoteStdInPipe(rpctransport,
             r'\%s%s%d' % (RemComSTDIN, packet['Machine'], packet['ProcessID']),
             smb.FILE_WRITE_DATA | smb.FILE_APPEND_DATA, installService.getShare()
@@ -194,15 +171,11 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         stdout_pipe.start()
         stderr_pipe.start()
 
-        # NOW send command - RemCom will create the pipes and the threads will connect
         if verbose:
             logging.info("Sending command to RemCom service...")
         s.writeNamedPipe(tid, fid_main, packet.getData())
 
-        # Give RemCom time to process and create pipes
-        time.sleep(1)
-
-        # Read response
+        # Block until response
         if verbose:
             logging.info("Reading command response...")
         ans = s.readNamedPipe(tid, fid_main, 8)
@@ -211,97 +184,80 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             retCode = RemComResponse(ans)
             if verbose:
                 logging.info(f"Process finished with ErrorCode: {retCode['ErrorCode']}, ReturnCode: {retCode['ReturnCode']}")
-        
-        # Let pipes drain output - give them time to capture everything
-        idle_checks = 0
-        last_counts = (-1, -1)
+        else:
+            retCode = RemComResponse()
+
+        # Adaptively wait for pipes to capture output - detect when output stops flowing
+        idle_count = 0
+        prev_stdout_len = 0
+        prev_stderr_len = 0
         start = time.time()
-        while time.time() - start < 15:          # max wait 15s
-            counts = (len(stdout_pipe.output), len(stderr_pipe.output))
-            if counts == last_counts:
-                idle_checks += 1
-                if idle_checks >= 3:              # ~1.5s of no new data (0.5s * 3)
-                    break
+        max_wait = 10
+        
+        if verbose:
+            logging.info("Waiting for output capture...")
+        
+        while time.time() - start < max_wait and idle_count < 2:
+            curr_stdout = len(stdout_pipe.output)
+            curr_stderr = len(stderr_pipe.output)
+            if curr_stdout == prev_stdout_len and curr_stderr == prev_stderr_len:
+                idle_count += 1
             else:
-                idle_checks = 0
-                last_counts = counts
+                idle_count = 0
+            prev_stdout_len = curr_stdout
+            prev_stderr_len = curr_stderr
             time.sleep(0.5)
         
-        # Stop pipe threads by closing their files
-        try:
-            if stdin_pipe.fid != 0:
-                stdin_pipe.server.closeFile(stdin_pipe.tid, stdin_pipe.fid)
-        except:
-            pass
-        try:
-            if stdout_pipe.fid != 0:
-                stdout_pipe.server.closeFile(stdout_pipe.tid, stdout_pipe.fid)
-        except:
-            pass
-        try:
-            if stderr_pipe.fid != 0:
-                stderr_pipe.server.closeFile(stderr_pipe.tid, stderr_pipe.fid)
-        except:
-            pass
-        
-        # Collect output from pipes
-        stdout_text = b"".join(stdout_pipe.output).decode(CODEC, errors="replace") if hasattr(stdout_pipe, 'output') else ""
-        stderr_text = b"".join(stderr_pipe.output).decode(CODEC, errors="replace") if hasattr(stderr_pipe, 'output') else ""
-
-        # Log captured output when verbose
         if verbose:
-            if stdout_text:
-                logging.info("STDOUT:\n%s", stdout_text)
-            if stderr_text:
-                logging.error("STDERR:\n%s", stderr_text)
+            logging.info(f"Output capture complete (waited {time.time() - start:.1f}s)")
         
-        if len(ans):
-            retCode = RemComResponse(ans)
-            if verbose:
-                logging.info(f"Process finished with ErrorCode: {retCode['ErrorCode']}, ReturnCode: {retCode['ReturnCode']}")
-            
-            error_code = retCode['ErrorCode']
-            return_code = retCode['ReturnCode']
-        else:
-            error_code = 1
-            return_code = None
+        # Collect output from pipes and strip carriage returns
+        stdout_text = b"".join(stdout_pipe.output).decode(CODEC, errors="replace").replace('\r', '').strip() if stdout_pipe.output else ""
+        stderr_text = b"".join(stderr_pipe.output).decode(CODEC, errors="replace").replace('\r', '').strip() if stderr_pipe.output else ""
+        
+        if verbose:
+            logging.info(f"Output captured: stdout={len(stdout_text)} chars, stderr={len(stderr_text)} chars")
 
         # Cleanup
-        if verbose:
-            logging.info("Waiting for service to finish...")
-        time.sleep(2)  # Give service time to fully complete
-        
-        if verbose:
-            logging.info("Uninstalling TomoeService...")
         installService.uninstall()
+        unInstalled = True
+        
         if remote_name:
             try:
                 s.deleteFile(installService.getShare(), remote_name)
-            except Exception:
+            except:
                 pass
 
-        # Prefer stderr when present so errors surface
+        # Validate command execution and provide meaningful error messages
+        if stderr_text and ("is not recognized" in stderr_text or "cannot be loaded" in stderr_text):
+            if verbose:
+                logging.error(f"Command execution failed: {stderr_text}")
+            return f"ERROR: {stderr_text}"
+        
+        if not stdout_text and not stderr_text and retCode['ReturnCode'] != 0:
+            error_msg = f"Command failed with return code {retCode['ReturnCode']}"
+            if verbose:
+                logging.error(error_msg)
+            return error_msg
+        
+        # Return stderr if present, else stdout
         if stderr_text:
             return stderr_text
-        return stdout_text
+        return stdout_text if stdout_text else f"Command executed with ErrorCode: {retCode['ErrorCode']}"
 
     except Exception as e:
         if verbose:
             logging.error(f"PsExec execution failed: {e}")
-        # Try to cleanup on error
-        try:
-            time.sleep(1)
-            if verbose:
-                logging.info("Cleaning up after error...")
-            installService.uninstall()
+        if not unInstalled:
+            try:
+                installService.uninstall()
+            except:
+                pass
             if remote_name:
                 try:
                     s.deleteFile(installService.getShare(), remote_name)
-                except Exception:
+                except:
                     pass
-        except Exception as cleanup_error:
-            if verbose:
-                logging.error(f"Cleanup error: {cleanup_error}")
         raise
 
 class Pipes(Thread):
@@ -317,6 +273,9 @@ class Pipes(Thread):
         self.pipe = pipe
         self.permissions = permissions
         self.daemon = True
+        self.stop = Event()
+        self.max_runtime = 300  # 5 minute timeout per pipe
+        self.start_time = None
 
     def connectPipe(self):
         try:
@@ -346,15 +305,85 @@ class Pipes(Thread):
                     pass
             
             if tries == 0:
+                logging.error(f'Pipe {self.pipe} not ready after {50*2}s, aborting')
                 raise Exception(f'Pipe {self.pipe} not ready, aborting')
             
             self.fid = self.server.openFile(self.tid, self.pipe, self.permissions, creationOption=0x40, fileAttributes=0x80)
             self.server.setTimeout(1000000)
-        except:
+            self.start_time = time.time()
+            logging.debug(f"Pipe {self.pipe} connected successfully")
+        except Exception as e:
+            logging.error(f"Failed to connect to pipe {self.pipe}: {e}")
             if logging.getLogger().level == logging.DEBUG:
                 import traceback
                 traceback.print_exc()
-            logging.error("Something wen't wrong connecting the pipes(%s), try again" % self.__class__)
+            raise
+
+
+
+class RemoteStdOutPipe(Pipes):
+    def __init__(self, transport, pipe, permisssions):
+        Pipes.__init__(self, transport, pipe, permisssions)
+        self.output = []
+
+    def run(self):
+        self.connectPipe()
+        
+        # Add timeout protection
+        if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+            logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+            return
+
+        if PY3:
+            while True:
+                try:
+                    stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
+                    if len(stdout_ans) > 0:
+                        self.output.append(stdout_ans)
+                except:
+                    pass
+        else:
+            while True:
+                try:
+                    stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
+                    if len(stdout_ans) > 0:
+                        data = stdout_ans if isinstance(stdout_ans, bytes) else stdout_ans.encode(CODEC)
+                        self.output.append(data)
+                except:
+                    pass
+
+
+class RemoteStdErrPipe(Pipes):
+    def __init__(self, transport, pipe, permisssions):
+        Pipes.__init__(self, transport, pipe, permisssions)
+        self.output = []
+
+    def run(self):
+        self.connectPipe()
+        
+        # Add timeout protection
+        if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+            logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+            return
+
+        if PY3:
+            while True:
+                try:
+                    stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
+                    if len(stderr_ans) > 0:
+                        self.output.append(stderr_ans)
+                except:
+                    pass
+        else:
+            while True:
+                try:
+                    stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
+                    if len(stderr_ans) > 0:
+                        data = stderr_ans if isinstance(stderr_ans, bytes) else stderr_ans.encode(CODEC)
+                        self.output.append(data)
+                except:
+                    pass
+
 
 
 class RemoteStdInPipe(Pipes):
@@ -364,228 +393,7 @@ class RemoteStdInPipe(Pipes):
 
     def run(self):
         self.connectPipe()
-        # Keep pipe open but don't send anything for non-interactive mode
+        # Non-interactive mode - just keep pipe open
         while True:
             time.sleep(1)
 
-
-class RemoteStdOutPipe(Pipes):
-    def __init__(self, transport, pipe, permisssions):
-        Pipes.__init__(self, transport, pipe, permisssions)
-        self.output = []  # Capture output instead of printing
-
-    def run(self):
-        self.connectPipe()
-
-        global LastDataSent
-
-        if PY3:
-            __stdoutOutputBuffer, __stdoutData = b"", b""
-
-            while True:
-                try:
-                    stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
-                except:
-                    pass
-                else:
-                    try:
-                        if stdout_ans != LastDataSent:
-                            if len(stdout_ans) != 0:
-                                # Append new data to the buffer while there is data to read
-                                __stdoutOutputBuffer += stdout_ans
-
-                        promptRegex = rb'([a-zA-Z]:[\\\/])((([a-zA-Z0-9 -\.]*)[\\\/]?)+(([a-zA-Z0-9 -\.]+))?)?>$'
-
-                        endsWithPrompt = bool(re.match(promptRegex, __stdoutOutputBuffer) is not None)
-                        if endsWithPrompt == True:
-                            # All data, we shouldn't have encoding errors
-                            # Adding a space after the prompt because it's beautiful
-                            __stdoutData = __stdoutOutputBuffer + b" "
-                            # Remainder data for next iteration
-                            __stdoutOutputBuffer = b""
-
-                            # print("[+] endsWithPrompt")
-                            # print(" | __stdoutData:",__stdoutData)
-                            # print(" | __stdoutOutputBuffer:",__stdoutOutputBuffer)
-                        elif b'\n' in __stdoutOutputBuffer:
-                            # We have read a line, print buffer if it is not empty
-                            lines = __stdoutOutputBuffer.split(b"\n")
-                            # All lines, we shouldn't have encoding errors
-                            __stdoutData = b"\n".join(lines[:-1]) + b"\n"
-                            # Remainder data for next iteration
-                            __stdoutOutputBuffer = lines[-1]
-                            # print("[+] newline in __stdoutOutputBuffer")
-                            # print(" | __stdoutData:",__stdoutData)
-                            # print(" | __stdoutOutputBuffer:",__stdoutOutputBuffer)
-
-                        if len(__stdoutData) != 0:
-                            # Store data in output buffer
-                            self.output.append(__stdoutData)
-                            __stdoutData = b""
-                        else:
-                            # Don't echo the command that was sent, and clear it up
-                            LastDataSent = b""
-                        # Just in case this got out of sync, i'm cleaning it up if there are more than 10 chars,
-                        # it will give false positives tho.. we should find a better way to handle this.
-                        # if LastDataSent > 10:
-                        #     LastDataSent = ''
-                    except:
-                        pass
-        else:
-            __stdoutOutputBuffer, __stdoutData = "", ""
-
-            while True:
-                try:
-                    stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
-                except:
-                    pass
-                else:
-                    try:
-                        if stdout_ans != LastDataSent:
-                            if len(stdout_ans) != 0:
-                                # Append new data to the buffer while there is data to read
-                                __stdoutOutputBuffer += stdout_ans
-
-                        promptRegex = r'([a-zA-Z]:[\\\/])((([a-zA-Z0-9 -\.]*)[\\\/]?)+(([a-zA-Z0-9 -\.]+))?)?>$'
-
-                        endsWithPrompt = bool(re.match(promptRegex, __stdoutOutputBuffer) is not None)
-                        if endsWithPrompt:
-                            # All data, we shouldn't have encoding errors
-                            # Adding a space after the prompt because it's beautiful
-                            __stdoutData = __stdoutOutputBuffer + " "
-                            # Remainder data for next iteration
-                            __stdoutOutputBuffer = ""
-
-                        elif '\n' in __stdoutOutputBuffer:
-                            # We have read a line, print buffer if it is not empty
-                            lines = __stdoutOutputBuffer.split("\n")
-                            # All lines, we shouldn't have encoding errors
-                            __stdoutData = "\n".join(lines[:-1]) + "\n"
-                            # Remainder data for next iteration
-                            __stdoutOutputBuffer = lines[-1]
-
-                        if len(__stdoutData) != 0:
-                            # Store data in output buffer
-                            self.output.append(__stdoutData if isinstance(__stdoutData, bytes) else __stdoutData.encode(CODEC))
-                            __stdoutData = ""
-                        else:
-                            # Don't echo the command that was sent, and clear it up
-                            LastDataSent = ""
-                        # Just in case this got out of sync, i'm cleaning it up if there are more than 10 chars,
-                        # it will give false positives tho.. we should find a better way to handle this.
-                        # if LastDataSent > 10:
-                        #     LastDataSent = ''
-                    except Exception as e:
-                        pass
-
-
-class RemoteStdErrPipe(Pipes):
-    def __init__(self, transport, pipe, permisssions):
-        Pipes.__init__(self, transport, pipe, permisssions)
-        self.output = []  # Capture output instead of printing
-
-    def run(self):
-        self.connectPipe()
-
-        if PY3:
-            __stderrOutputBuffer, __stderrData = b'', b''
-
-            while True:
-                try:
-                    stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
-                except:
-                    pass
-                else:
-                    try:
-                        if len(stderr_ans) != 0:
-                            # Append new data to the buffer while there is data to read
-                            __stderrOutputBuffer += stderr_ans
-
-                        if b'\n' in __stderrOutputBuffer:
-                            # We have read a line, print buffer if it is not empty
-                            lines = __stderrOutputBuffer.split(b"\n")
-                            # All lines, we shouldn't have encoding errors
-                            __stderrData = b"\n".join(lines[:-1]) + b"\n"
-                            # Remainder data for next iteration
-                            __stderrOutputBuffer = lines[-1]
-
-                        if len(__stderrData) != 0:
-                            # Store data in output buffer
-                            self.output.append(__stderrData)
-                            __stderrData = b""
-                        else:
-                            # Don't echo the command that was sent, and clear it up
-                            LastDataSent = b""
-                        # Just in case this got out of sync, i'm cleaning it up if there are more than 10 chars,
-                        # it will give false positives tho.. we should find a better way to handle this.
-                        # if LastDataSent > 10:
-                        #     LastDataSent = ''
-                    except Exception as e:
-                        pass
-        else:
-            __stderrOutputBuffer, __stderrData = '', ''
-
-            while True:
-                try:
-                    stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
-                except:
-                    pass
-                else:
-                    try:
-                        if len(stderr_ans) != 0:
-                            # Append new data to the buffer while there is data to read
-                            __stderrOutputBuffer += stderr_ans
-
-                        if '\n' in __stderrOutputBuffer:
-                            # We have read a line, print buffer if it is not empty
-                            lines = __stderrOutputBuffer.split("\n")
-                            # All lines, we shouldn't have encoding errors
-                            __stderrData = "\n".join(lines[:-1]) + "\n"
-                            # Remainder data for next iteration
-                            __stderrOutputBuffer = lines[-1]
-
-                        if len(__stderrData) != 0:
-                            # Store data in output buffer
-                            self.output.append(__stderrData if isinstance(__stderrData, bytes) else __stderrData.encode(CODEC))
-                            __stderrData = ""
-                        else:
-                            # Don't echo the command that was sent, and clear it up
-                            LastDataSent = ""
-                        # Just in case this got out of sync, i'm cleaning it up if there are more than 10 chars,
-                        # it will give false positives tho.. we should find a better way to handle this.
-                        # if LastDataSent > 10:
-                        #     LastDataSent = ''
-                    except:
-                        pass
-
-if __name__ == "__main__":
-    # Test run - modify these parameters for your target
-    target_ip = "192.168.1.131"
-    username = "Administrator"
-    password = "P@ssw0rd!"
-    domain = ""
-    
-    print("[*] Testing SMB PsExec functionality")
-    print(f"[*] Target: {target_ip}")
-    print(f"[*] User: {username}")
-    print("-" * 60)
-    
-    try:
-        # Test with a simple command first to verify pipes work
-        print("[+] Testing simple command: whoami")
-        result = run_psexec(
-            target_ip=target_ip,
-            username=username,
-            password=password,
-            domain=domain,
-            command="whoami",
-            verbose=True
-        )
-        print("[+] Command output:")
-        print(result)
-        print("-" * 60)
-        
-    except Exception as e:
-        print(f"[-] Error: {e}")
-        import traceback
-        traceback.print_exc()
