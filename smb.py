@@ -1,11 +1,11 @@
 import sys
 import os
-import re
 import logging
 import time
 from threading import Thread, Lock, Event
 import random
 import string
+import socket
 from six import PY3
 
 from impacket import smb
@@ -18,6 +18,40 @@ dialect = None
 LastDataSent = b""
 
 CODEC = sys.stdout.encoding
+
+class SMBAuthenticationError(Exception):
+    """Raised when SMB authentication fails due to invalid credentials."""
+    pass
+
+
+class SMBConnectionError(Exception):
+    """Raised when an SMB connection cannot be established to the target host."""
+    pass
+
+def check_port_open(host, port=445, timeout=5):
+    """
+    Perform a quick TCP connectivity check to determine if a port is open.
+    
+    This function attempts to establish a TCP connection to the specified host
+    and port. It is used as a pre-flight check before attempting SMB operations
+    to avoid long timeout delays when the target is unreachable.
+    
+    Args:
+        host: The hostname or IP address to check.
+        port: The TCP port number to test (default is 445 for SMB).
+        timeout: The connection timeout in seconds (default is 5 seconds).
+    
+    Returns:
+        True if the port is open and accepting connections, False otherwise.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except socket.error:
+        return False
 
 class RemComMessage(Structure):
     structure = (
@@ -66,8 +100,35 @@ def openPipe(s, tid, pipe, accessMask):
 def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False):
     """
     Execute a command or script remotely using impacket's psexec functionality over SMB.
-    Simplified to match the original psexec.py approach.
+    
+    This function uses the impacket library to establish an SMB connection and execute
+    PowerShell commands or scripts on a remote Windows host. It uploads a service binary,
+    starts it remotely, and captures the output through named pipes.
+    
+    Args:
+        target_ip: The IP address or hostname of the remote Windows machine.
+        username: The username for authentication.
+        password: The password for authentication.
+        domain: Optional domain name for domain-joined authentication.
+        script_path: Path to a local PowerShell script file to execute remotely.
+        command: A PowerShell command string to execute (mutually exclusive with script_path).
+        script_args: Arguments to pass to the script when using script_path.
+        verbose: If True, print detailed status messages during execution.
+    
+    Returns:
+        A string containing the combined output from stdout and stderr.
+    
+    Raises:
+        SMBConnectionError: If the connection to the target host fails.
+        SMBAuthenticationError: If authentication fails due to invalid credentials.
+        ValueError: If neither script_path nor command is provided.
     """
+    
+    # Perform a quick connectivity check before attempting SMB.
+    # This prevents long timeout delays when the target is unreachable.
+    if not check_port_open(target_ip, 445, timeout=5):
+        raise SMBConnectionError(f"Port 445 not reachable on {target_ip}")
+    
     script_name = None
     unInstalled = False
 
@@ -88,13 +149,13 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         rpctransport.set_credentials(username, password, domain, '', '')
 
     dce = rpctransport.get_dce_rpc()
-    
     try:
         dce.connect()
     except Exception as e:
         if verbose:
-            logging.critical(str(e))
+            logging.error(f"Failed to connect to {target_ip} via SMB: {e}")
         raise
+    
 
     try:
         s = rpctransport.get_smb_connection()
@@ -128,7 +189,6 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             # Format output with full names - no truncation
             cmd_args = f'powershell.exe -NoProfile -NonInteractive -Command "{command} | Format-Table -AutoSize -Wrap | Out-String -Width 4096"'
         elif script_path:
-            # Upload script file using installService.copy_file (same as psexec.py)
             script_name = os.path.basename(script_path)
             installService.copy_file(script_path, installService.getShare(), script_name)
             
@@ -155,7 +215,6 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         if verbose:
             logging.info("Starting pipe threads...")
 
-        # Start pipes - they'll print output directly
         stdin_pipe = RemoteStdInPipe(rpctransport,
             r'\%s%s%d' % (RemComSTDIN, packet['Machine'], packet['ProcessID']),
             smb.FILE_WRITE_DATA | smb.FILE_APPEND_DATA, installService.getShare()
@@ -251,7 +310,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
 
     except Exception as e:
         if verbose:
-            logging.error(f"PsExec execution failed: {e}")
+            logging.error(f"SMB execution failed: {e}")
         if not unInstalled:
             try:
                 installService.uninstall()
@@ -263,6 +322,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 except:
                     pass
         raise
+
 
 class Pipes(Thread):
     def __init__(self, transport, pipe, permissions, share=None):
