@@ -8,7 +8,7 @@ import random
 import string
 from six import PY3
 
-from impacket import version, smb
+from impacket import smb
 from impacket.structure import Structure
 from impacket.examples import remcomsvc, serviceinstall
 from impacket.dcerpc.v5 import transport
@@ -68,7 +68,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
     Execute a command or script remotely using impacket's psexec functionality over SMB.
     Simplified to match the original psexec.py approach.
     """
-    remote_name = None
+    script_name = None
     unInstalled = False
 
     if verbose:
@@ -125,12 +125,16 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
 
         # Build command
         if command:
-            cmd_args = f'powershell.exe -NoProfile -NonInteractive -Command {command}'
+            # Format output with full names - no truncation
+            cmd_args = f'powershell.exe -NoProfile -NonInteractive -Command "{command} | Format-Table -AutoSize -Wrap | Out-String -Width 4096"'
         elif script_path:
-            with open(script_path, "rb") as fh:
-                remote_name = f"Windows\\Temp\\{os.path.basename(script_path)}"
-                s.putFile(installService.getShare(), remote_name, fh.read)
-            cmd_args = f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\\Windows\\Temp\\{os.path.basename(script_path)}" {script_args}'
+            # Upload script file using installService.copy_file (same as psexec.py)
+            script_name = os.path.basename(script_path)
+            installService.copy_file(script_path, installService.getShare(), script_name)
+            
+            # Execute directly from SMB share using UNC path
+            unc_path = f"\\\\{target_ip}\\{installService.getShare()}\\{script_name}"
+            cmd_args = f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{unc_path}" {script_args}'
         else:
             raise ValueError("Either command or script_path is required")
 
@@ -222,9 +226,9 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         installService.uninstall()
         unInstalled = True
         
-        if remote_name:
+        if script_name:
             try:
-                s.deleteFile(installService.getShare(), remote_name)
+                s.deleteFile(installService.getShare(), script_name)
             except:
                 pass
 
@@ -253,9 +257,9 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 installService.uninstall()
             except:
                 pass
-            if remote_name:
+            if script_name:
                 try:
-                    s.deleteFile(installService.getShare(), remote_name)
+                    s.deleteFile(installService.getShare(), script_name)
                 except:
                     pass
         raise
@@ -396,4 +400,3 @@ class RemoteStdInPipe(Pipes):
         # Non-interactive mode - just keep pipe open
         while True:
             time.sleep(1)
-
