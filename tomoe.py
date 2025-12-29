@@ -293,13 +293,13 @@ if __name__ == "__main__":
 
     # Script or Command; but never both.
     exec_group = parser.add_mutually_exclusive_group(required=True)
-    exec_group.add_argument("--script", help="local path to PowerShell script to execute")
-    exec_group.add_argument("--command", help="powershell command to execute")
+    exec_group.add_argument("-s", "--script", help="local path to PowerShell script to execute")
+    exec_group.add_argument("-c", "--command", help="powershell command to execute")
     
     # Arguments to pass to the script.
-    parser.add_argument("--args", default="", help="arguments to pass to the script")
+    parser.add_argument("-a", "--args", default="", help="arguments to pass to the script")
     parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
-    parser.add_argument("--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
+    parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
 
     args = parser.parse_args()
     
