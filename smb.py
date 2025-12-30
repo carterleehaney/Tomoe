@@ -15,9 +15,8 @@ from impacket.dcerpc.v5 import transport
 from impacket.smbconnection import SMBConnection
 
 dialect = None
-LastDataSent = b""
 
-CODEC = sys.stdout.encoding
+CODEC = sys.stdout.encoding or 'utf-8'
 
 class SMBAuthenticationError(Exception):
     """Raised when SMB authentication fails due to invalid credentials."""
@@ -86,10 +85,9 @@ def openPipe(s, tid, pipe, accessMask):
         try:
             s.waitNamedPipe(tid, pipe)
             pipeReady = True
-        except:
+        except Exception:
             tries -= 1
             time.sleep(2)
-            pass
 
     if tries == 0:
         raise Exception('Pipe not ready, aborting')
@@ -176,7 +174,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         try:
             installService.uninstall()
             time.sleep(2)
-        except:
+        except Exception:
             pass
 
         if verbose:
@@ -274,6 +272,11 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         if verbose:
             logging.info(f"Output capture complete (waited {time.time() - start:.1f}s)")
         
+        # Signal threads to stop
+        stdin_pipe.stop.set()
+        stdout_pipe.stop.set()
+        stderr_pipe.stop.set()
+        
         # Collect output from pipes and strip carriage returns
         stdout_text = b"".join(stdout_pipe.output).decode(CODEC, errors="replace").replace('\r', '').strip() if stdout_pipe.output else ""
         stderr_text = b"".join(stderr_pipe.output).decode(CODEC, errors="replace").replace('\r', '').strip() if stderr_pipe.output else ""
@@ -288,7 +291,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         if script_name:
             try:
                 s.deleteFile(installService.getShare(), script_name)
-            except:
+            except Exception:
                 pass
 
         # Validate command execution and provide meaningful error messages
@@ -314,12 +317,12 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         if not unInstalled:
             try:
                 installService.uninstall()
-            except:
+            except Exception:
                 pass
             if script_name:
                 try:
                     s.deleteFile(installService.getShare(), script_name)
-                except:
+                except Exception:
                     pass
         raise
 
@@ -363,10 +366,9 @@ class Pipes(Thread):
                 try:
                     self.server.waitNamedPipe(self.tid, self.pipe)
                     pipeReady = True
-                except:
+                except Exception:
                     tries -= 1
                     time.sleep(2)
-                    pass
             
             if tries == 0:
                 logging.error(f'Pipe {self.pipe} not ready after {50*2}s, aborting')
@@ -393,28 +395,33 @@ class RemoteStdOutPipe(Pipes):
     def run(self):
         self.connectPipe()
         
-        # Add timeout protection
-        if self.start_time and (time.time() - self.start_time) > self.max_runtime:
-            logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
-            return
-
         if PY3:
-            while True:
+            while not self.stop.is_set():
+                # Add timeout protection
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    return
                 try:
                     stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stdout_ans) > 0:
                         self.output.append(stdout_ans)
-                except:
-                    pass
+                except Exception:
+                    # Likely EOF or connection closed - exit gracefully
+                    break
         else:
-            while True:
+            while not self.stop.is_set():
+                # Add timeout protection
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    return
                 try:
                     stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stdout_ans) > 0:
                         data = stdout_ans if isinstance(stdout_ans, bytes) else stdout_ans.encode(CODEC)
                         self.output.append(data)
-                except:
-                    pass
+                except Exception:
+                    # Likely EOF or connection closed - exit gracefully
+                    break
 
 
 class RemoteStdErrPipe(Pipes):
@@ -425,28 +432,33 @@ class RemoteStdErrPipe(Pipes):
     def run(self):
         self.connectPipe()
         
-        # Add timeout protection
-        if self.start_time and (time.time() - self.start_time) > self.max_runtime:
-            logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
-            return
-
         if PY3:
-            while True:
+            while not self.stop.is_set():
+                # Add timeout protection
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    return
                 try:
                     stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stderr_ans) > 0:
                         self.output.append(stderr_ans)
-                except:
-                    pass
+                except Exception:
+                    # Likely EOF or connection closed - exit gracefully
+                    break
         else:
-            while True:
+            while not self.stop.is_set():
+                # Add timeout protection
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    return
                 try:
                     stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stderr_ans) > 0:
                         data = stderr_ans if isinstance(stderr_ans, bytes) else stderr_ans.encode(CODEC)
                         self.output.append(data)
-                except:
-                    pass
+                except Exception:
+                    # Likely EOF or connection closed - exit gracefully
+                    break
 
 
 
@@ -457,6 +469,6 @@ class RemoteStdInPipe(Pipes):
 
     def run(self):
         self.connectPipe()
-        # Non-interactive mode - just keep pipe open
-        while True:
+        # Non-interactive mode - just keep pipe open until stop is signaled
+        while not self.stop.is_set():
             time.sleep(1)
