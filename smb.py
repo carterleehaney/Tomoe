@@ -107,7 +107,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
     
     Args:
         target_ip: The IP address or hostname of the remote Windows machine.
-        username: The username for authentication.
+        username: The username for authentication (can be in DOMAIN\\username format).
         password: The password for authentication.
         domain: Optional domain name for domain-joined authentication.
         script_path: Path to a local PowerShell script file to execute remotely.
@@ -123,6 +123,10 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         SMBAuthenticationError: If authentication fails due to invalid credentials.
         ValueError: If neither script_path nor command is provided.
     """
+    
+    # Extract domain from username if in DOMAIN\username format
+    if '\\' in username:
+        domain, username = username.split('\\', 1)
     
     # Perform a quick connectivity check before attempting SMB.
     # This prevents long timeout delays when the target is unreachable.
