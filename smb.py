@@ -2,6 +2,7 @@ import sys
 import os
 import logging
 import time
+import locale
 from threading import Thread, Lock, Event
 import random
 import string
@@ -12,11 +13,11 @@ from impacket import smb
 from impacket.structure import Structure
 from impacket.examples import remcomsvc, serviceinstall
 from impacket.dcerpc.v5 import transport
-from impacket.smbconnection import SMBConnection
+from impacket.smbconnection import SMBConnection, SessionError
 
 dialect = None
 
-CODEC = sys.stdout.encoding or 'utf-8'
+CODEC = sys.stdout.encoding or locale.getpreferredencoding() or 'utf-8'
 
 class SMBAuthenticationError(Exception):
     """Raised when SMB authentication fails due to invalid credentials."""
@@ -344,6 +345,13 @@ class Pipes(Thread):
         self.max_runtime = 300  # 5 minute timeout per pipe
         self.start_time = None
 
+    def _check_timeout(self):
+        """Check if pipe has exceeded maximum runtime. Returns True if timeout exceeded."""
+        if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+            logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+            return True
+        return False
+
     def connectPipe(self):
         try:
             lock.acquire()
@@ -397,30 +405,32 @@ class RemoteStdOutPipe(Pipes):
         
         if PY3:
             while not self.stop.is_set():
-                # Add timeout protection
-                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
-                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                if self._check_timeout():
                     return
                 try:
                     stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stdout_ans) > 0:
                         self.output.append(stdout_ans)
-                except Exception:
-                    # Likely EOF or connection closed - exit gracefully
+                except (SessionError, ConnectionResetError, BrokenPipeError, EOFError):
+                    # Pipe closed or connection lost - exit gracefully
+                    break
+                except Exception as e:
+                    logging.debug(f"Unexpected error reading stdout pipe: {e}")
                     break
         else:
             while not self.stop.is_set():
-                # Add timeout protection
-                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
-                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                if self._check_timeout():
                     return
                 try:
                     stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stdout_ans) > 0:
                         data = stdout_ans if isinstance(stdout_ans, bytes) else stdout_ans.encode(CODEC)
                         self.output.append(data)
-                except Exception:
-                    # Likely EOF or connection closed - exit gracefully
+                except (SessionError, ConnectionResetError, BrokenPipeError, EOFError):
+                    # Pipe closed or connection lost - exit gracefully
+                    break
+                except Exception as e:
+                    logging.debug(f"Unexpected error reading stdout pipe: {e}")
                     break
 
 
@@ -434,30 +444,32 @@ class RemoteStdErrPipe(Pipes):
         
         if PY3:
             while not self.stop.is_set():
-                # Add timeout protection
-                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
-                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                if self._check_timeout():
                     return
                 try:
                     stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stderr_ans) > 0:
                         self.output.append(stderr_ans)
-                except Exception:
-                    # Likely EOF or connection closed - exit gracefully
+                except (SessionError, ConnectionResetError, BrokenPipeError, EOFError):
+                    # Pipe closed or connection lost - exit gracefully
+                    break
+                except Exception as e:
+                    logging.debug(f"Unexpected error reading stderr pipe: {e}")
                     break
         else:
             while not self.stop.is_set():
-                # Add timeout protection
-                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
-                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                if self._check_timeout():
                     return
                 try:
                     stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stderr_ans) > 0:
                         data = stderr_ans if isinstance(stderr_ans, bytes) else stderr_ans.encode(CODEC)
                         self.output.append(data)
-                except Exception:
-                    # Likely EOF or connection closed - exit gracefully
+                except (SessionError, ConnectionResetError, BrokenPipeError, EOFError):
+                    # Pipe closed or connection lost - exit gracefully
+                    break
+                except Exception as e:
+                    logging.debug(f"Unexpected error reading stderr pipe: {e}")
                     break
 
 
