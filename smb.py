@@ -17,6 +17,10 @@ from impacket.smbconnection import SMBConnection, SessionError
 
 dialect = None
 
+# Encoding detection with fallback chain:
+# 1. sys.stdout.encoding - preferred, matches current output stream
+# 2. locale.getpreferredencoding() - system's preferred encoding
+# 3. 'utf-8' - universal fallback for cross-platform compatibility
 CODEC = sys.stdout.encoding or locale.getpreferredencoding() or 'utf-8'
 
 class SMBAuthenticationError(Exception):
