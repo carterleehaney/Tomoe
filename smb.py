@@ -320,10 +320,14 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 logging.error(error_msg)
             return error_msg
         
-        # Return stderr if present, else stdout
+        # Return combined output: stdout first, then stderr, preserving all streams
+        if stdout_text and stderr_text:
+            return stdout_text + "\n" + stderr_text
+        if stdout_text:
+            return stdout_text
         if stderr_text:
             return stderr_text
-        return stdout_text if stdout_text else f"Command executed with ErrorCode: {retCode['ErrorCode']}"
+        return f"Command executed with ErrorCode: {retCode['ErrorCode']}"
 
     except Exception as e:
         if verbose:
