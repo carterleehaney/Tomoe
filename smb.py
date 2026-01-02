@@ -17,7 +17,7 @@ from impacket.smbconnection import SMBConnection
 dialect = None
 LastDataSent = b""
 
-CODEC = sys.stdout.encoding
+CODEC = sys.stdout.encoding or 'utf-8'
 
 class SMBAuthenticationError(Exception):
     """Raised when SMB authentication fails due to invalid credentials."""
