@@ -283,10 +283,13 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         stdout_pipe.stop.set()
         stderr_pipe.stop.set()
         
+        # Give threads a moment to process the stop signal
+        time.sleep(0.1)
+        
         # Join threads with timeout to ensure proper cleanup
-        stdin_pipe.join(timeout=5)
-        stdout_pipe.join(timeout=5)
-        stderr_pipe.join(timeout=5)
+        stdin_pipe.join(5.0)
+        stdout_pipe.join(5.0)
+        stderr_pipe.join(5.0)
         
         # Collect output from pipes and strip carriage returns
         stdout_text = b"".join(stdout_pipe.output).decode(CODEC, errors="replace").replace('\r', '').strip() if stdout_pipe.output else ""
