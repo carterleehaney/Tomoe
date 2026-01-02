@@ -412,14 +412,13 @@ class RemoteStdOutPipe(Pipes):
 
     def run(self):
         self.connectPipe()
-        
-        # Add timeout protection
-        if self.start_time and (time.time() - self.start_time) > self.max_runtime:
-            logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
-            return
 
         if PY3:
             while not self.stop.is_set():
+                # Check timeout protection inside the loop
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    break
                 try:
                     stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stdout_ans) > 0:
@@ -428,6 +427,10 @@ class RemoteStdOutPipe(Pipes):
                     pass
         else:
             while not self.stop.is_set():
+                # Check timeout protection inside the loop
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    break
                 try:
                     stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stdout_ans) > 0:
@@ -444,14 +447,13 @@ class RemoteStdErrPipe(Pipes):
 
     def run(self):
         self.connectPipe()
-        
-        # Add timeout protection
-        if self.start_time and (time.time() - self.start_time) > self.max_runtime:
-            logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
-            return
 
         if PY3:
             while not self.stop.is_set():
+                # Check timeout protection inside the loop
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    break
                 try:
                     stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stderr_ans) > 0:
@@ -460,6 +462,10 @@ class RemoteStdErrPipe(Pipes):
                     pass
         else:
             while not self.stop.is_set():
+                # Check timeout protection inside the loop
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    break
                 try:
                     stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stderr_ans) > 0:
