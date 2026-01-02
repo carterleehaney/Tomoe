@@ -426,8 +426,7 @@ class RemoteStdOutPipe(Pipes):
                     if len(stdout_ans) > 0:
                         self.output.append(stdout_ans)
                 except Exception as e:
-                    if logging.getLogger().level == logging.DEBUG:
-                        logging.debug(f"Exception reading from stdout pipe {self.pipe}: {e}")
+                    logging.debug(f"Exception reading from stdout pipe {self.pipe}: {e}")
                     pass
         else:
             while not self.stop.is_set():
@@ -437,8 +436,7 @@ class RemoteStdOutPipe(Pipes):
                         data = stdout_ans if isinstance(stdout_ans, bytes) else stdout_ans.encode(CODEC)
                         self.output.append(data)
                 except Exception as e:
-                    if logging.getLogger().level == logging.DEBUG:
-                        logging.debug(f"Exception reading from stdout pipe {self.pipe}: {e}")
+                    logging.debug(f"Exception reading from stdout pipe {self.pipe}: {e}")
                     pass
 
 
@@ -462,8 +460,7 @@ class RemoteStdErrPipe(Pipes):
                     if len(stderr_ans) > 0:
                         self.output.append(stderr_ans)
                 except Exception as e:
-                    if logging.getLogger().level == logging.DEBUG:
-                        logging.debug(f"Exception reading from stderr pipe {self.pipe}: {e}")
+                    logging.debug(f"Exception reading from stderr pipe {self.pipe}: {e}")
                     pass
         else:
             while not self.stop.is_set():
@@ -473,8 +470,7 @@ class RemoteStdErrPipe(Pipes):
                         data = stderr_ans if isinstance(stderr_ans, bytes) else stderr_ans.encode(CODEC)
                         self.output.append(data)
                 except Exception as e:
-                    if logging.getLogger().level == logging.DEBUG:
-                        logging.debug(f"Exception reading from stderr pipe {self.pipe}: {e}")
+                    logging.debug(f"Exception reading from stderr pipe {self.pipe}: {e}")
                     pass
 
 
