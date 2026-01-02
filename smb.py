@@ -278,6 +278,16 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         if verbose:
             logging.info(f"Output capture complete (waited {time.time() - start:.1f}s)")
         
+        # Signal threads to stop
+        stdin_pipe.stop.set()
+        stdout_pipe.stop.set()
+        stderr_pipe.stop.set()
+        
+        # Join threads with timeout to ensure proper cleanup
+        stdin_pipe.join(timeout=5)
+        stdout_pipe.join(timeout=5)
+        stderr_pipe.join(timeout=5)
+        
         # Collect output from pipes and strip carriage returns
         stdout_text = b"".join(stdout_pipe.output).decode(CODEC, errors="replace").replace('\r', '').strip() if stdout_pipe.output else ""
         stderr_text = b"".join(stderr_pipe.output).decode(CODEC, errors="replace").replace('\r', '').strip() if stderr_pipe.output else ""
@@ -403,7 +413,7 @@ class RemoteStdOutPipe(Pipes):
             return
 
         if PY3:
-            while True:
+            while not self.stop.is_set():
                 try:
                     stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stdout_ans) > 0:
@@ -411,7 +421,7 @@ class RemoteStdOutPipe(Pipes):
                 except:
                     pass
         else:
-            while True:
+            while not self.stop.is_set():
                 try:
                     stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stdout_ans) > 0:
@@ -435,7 +445,7 @@ class RemoteStdErrPipe(Pipes):
             return
 
         if PY3:
-            while True:
+            while not self.stop.is_set():
                 try:
                     stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stderr_ans) > 0:
@@ -443,7 +453,7 @@ class RemoteStdErrPipe(Pipes):
                 except:
                     pass
         else:
-            while True:
+            while not self.stop.is_set():
                 try:
                     stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
                     if len(stderr_ans) > 0:
@@ -462,5 +472,5 @@ class RemoteStdInPipe(Pipes):
     def run(self):
         self.connectPipe()
         # Non-interactive mode - just keep pipe open
-        while True:
+        while not self.stop.is_set():
             time.sleep(1)
