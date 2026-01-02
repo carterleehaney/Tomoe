@@ -127,6 +127,14 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
     if '\\' in username:
         domain, username = username.split('\\', 1)
     
+    # Suppress impacket's verbose logging before any operations
+    impacket_logger = logging.getLogger('impacket')
+    impacket_logger.setLevel(logging.CRITICAL + 1)  # Effectively disable all impacket logging
+    
+    if verbose:
+        logging.info(f"Preparing to execute on {target_ip} as {domain}\\{username}")
+        impacket_logger.setLevel(logging.INFO)
+
     # Perform a quick connectivity check before attempting SMB.
     # This prevents long timeout delays when the target is unreachable.
     if not check_port_open(target_ip, 445, timeout=5):
