@@ -14,7 +14,6 @@ from impacket.examples import remcomsvc, serviceinstall
 from impacket.dcerpc.v5 import transport
 from impacket.smbconnection import SMBConnection
 
-dialect = None
 LastDataSent = b""
 
 CODEC = sys.stdout.encoding or 'utf-8'
@@ -165,7 +164,6 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         s = rpctransport.get_smb_connection()
         s.setTimeout(100000)
 
-        global dialect
         dialect = s.getDialect()
         
         # Use dynamic service name to avoid conflicts
@@ -221,17 +219,20 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
 
         stdin_pipe = RemoteStdInPipe(rpctransport,
             r'\%s%s%d' % (RemComSTDIN, packet['Machine'], packet['ProcessID']),
-            smb.FILE_WRITE_DATA | smb.FILE_APPEND_DATA, installService.getShare()
+            smb.FILE_WRITE_DATA | smb.FILE_APPEND_DATA, installService.getShare(),
+            dialect
         )
         stdout_pipe = RemoteStdOutPipe(
             rpctransport,
             r'\%s%s%d' % (RemComSTDOUT, packet['Machine'], packet['ProcessID']),
-            smb.FILE_READ_DATA
+            smb.FILE_READ_DATA,
+            dialect
         )
         stderr_pipe = RemoteStdErrPipe(
             rpctransport,
             r'\%s%s%d' % (RemComSTDERR, packet['Machine'], packet['ProcessID']),
-            smb.FILE_READ_DATA
+            smb.FILE_READ_DATA,
+            dialect
         )
         
         stdin_pipe.start()
@@ -300,7 +301,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
 
         # Cleanup
         installService.uninstall()
-        unInstalled = True
+        uninstalled = True
         
         if script_name:
             try:
@@ -346,7 +347,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
 
 
 class Pipes(Thread):
-    def __init__(self, transport, pipe, permissions, share=None):
+    def __init__(self, transport, pipe, permissions, share=None, dialect=None):
         Thread.__init__(self)
         self.server = 0
         self.transport = transport
@@ -361,14 +362,13 @@ class Pipes(Thread):
         self.stop = Event()
         self.max_runtime = 300  # 5 minute timeout per pipe
         self.start_time = None
+        self.dialect = dialect
 
     def connectPipe(self):
         try:
             lock.acquire()
-            global dialect
-            #self.server = SMBConnection('*SMBSERVER', self.transport.get_smb_connection().getRemoteHost(), sess_port = self.port, preferredDialect = SMB_DIALECT)
             self.server = SMBConnection(self.transport.get_smb_connection().getRemoteName(), self.transport.get_smb_connection().getRemoteHost(),
-                                        sess_port=self.port, preferredDialect=dialect)
+                                        sess_port=self.port, preferredDialect=self.dialect)
             user, passwd, domain, lm, nt, aesKey, TGT, TGS = self.credentials
             if self.transport.get_kerberos() is True:
                 self.server.kerberosLogin(user, passwd, domain, lm, nt, aesKey, kdcHost=self.transport.get_kdcHost(), TGT=TGT, TGS=TGS)
@@ -407,8 +407,8 @@ class Pipes(Thread):
 
 
 class RemoteStdOutPipe(Pipes):
-    def __init__(self, transport, pipe, permisssions):
-        Pipes.__init__(self, transport, pipe, permisssions)
+    def __init__(self, transport, pipe, permisssions, dialect=None):
+        Pipes.__init__(self, transport, pipe, permisssions, dialect=dialect)
         self.output = []
 
     def run(self):
@@ -444,8 +444,8 @@ class RemoteStdOutPipe(Pipes):
 
 
 class RemoteStdErrPipe(Pipes):
-    def __init__(self, transport, pipe, permisssions):
-        Pipes.__init__(self, transport, pipe, permisssions)
+    def __init__(self, transport, pipe, permisssions, dialect=None):
+        Pipes.__init__(self, transport, pipe, permisssions, dialect=dialect)
         self.output = []
 
     def run(self):
@@ -482,9 +482,9 @@ class RemoteStdErrPipe(Pipes):
 
 
 class RemoteStdInPipe(Pipes):
-    def __init__(self, transport, pipe, permisssions, share=None):
+    def __init__(self, transport, pipe, permisssions, share=None, dialect=None):
         self.shell = None
-        Pipes.__init__(self, transport, pipe, permisssions, share)
+        Pipes.__init__(self, transport, pipe, permisssions, share, dialect)
 
     def run(self):
         self.connectPipe()
