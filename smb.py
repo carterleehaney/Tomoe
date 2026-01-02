@@ -300,7 +300,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
 
         # Cleanup
         installService.uninstall()
-        unInstalled = True
+        uninstalled = True
         
         if script_name:
             try:
