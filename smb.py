@@ -1,39 +1,153 @@
 import sys
 import os
 import logging
+import time
+from threading import Thread, Lock, Event
+import random
+import string
+import socket
+from six import PY3
+
+from impacket import smb
+from impacket.structure import Structure
 from impacket.examples import remcomsvc, serviceinstall
 from impacket.dcerpc.v5 import transport
 from impacket.smbconnection import SMBConnection
 
+LastDataSent = b""
+
+CODEC = sys.stdout.encoding or 'utf-8'
+
+class SMBAuthenticationError(Exception):
+    """Raised when SMB authentication fails due to invalid credentials."""
+    pass
+
+
+class SMBConnectionError(Exception):
+    """Raised when an SMB connection cannot be established to the target host."""
+    pass
+
+def check_port_open(host, port=445, timeout=5):
+    """
+    Perform a quick TCP connectivity check to determine if a port is open.
+    
+    This function attempts to establish a TCP connection to the specified host
+    and port. It is used as a pre-flight check before attempting SMB operations
+    to avoid long timeout delays when the target is unreachable.
+    
+    Args:
+        host: The hostname or IP address to check.
+        port: The TCP port number to test (default is 445 for SMB).
+        timeout: The connection timeout in seconds (default is 5 seconds).
+    
+    Returns:
+        True if the port is open and accepting connections, False otherwise.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except socket.error:
+        return False
+
+class RemComMessage(Structure):
+    structure = (
+        ('Command','4096s=""'),
+        ('WorkingDir','260s=""'),
+        ('Priority','<L=0x20'),
+        ('ProcessID','<L=0x01'),
+        ('Machine','260s=""'),
+        ('NoWait','<L=0'),
+    )
+
+class RemComResponse(Structure):
+    structure = (
+        ('ErrorCode','<L=0'),
+        ('ReturnCode','<L=0'),
+    )
+
+RemComSTDOUT = "RemCom_stdout"
+RemComSTDIN = "RemCom_stdin"
+RemComSTDERR = "RemCom_stderr"
+
+lock = Lock()
+
+def openPipe(s, tid, pipe, accessMask):
+    """
+    Wait for a named pipe to become ready and open it.
+    Returns the file ID on success, raises exception on timeout.
+    """
+    pipeReady = False
+    tries = 50
+    while pipeReady is False and tries > 0:
+        try:
+            s.waitNamedPipe(tid, pipe)
+            pipeReady = True
+        except:
+            tries -= 1
+            time.sleep(2)
+            pass
+
+    if tries == 0:
+        raise Exception('Pipe not ready, aborting')
+
+    fid = s.openFile(tid, pipe, accessMask, creationOption=0x40, fileAttributes=0x80)
+    return fid
+
 def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False):
     """
     Execute a command or script remotely using impacket's psexec functionality over SMB.
+    
+    This function uses the impacket library to establish an SMB connection and execute
+    PowerShell commands or scripts on a remote Windows host. It uploads a service binary,
+    starts it remotely, and captures the output through named pipes.
+    
+    Args:
+        target_ip: The IP address or hostname of the remote Windows machine.
+        username: The username for authentication (can be in DOMAIN\\username format).
+        password: The password for authentication.
+        domain: Optional domain name for domain-joined authentication.
+        script_path: Path to a local PowerShell script file to execute remotely.
+        command: A PowerShell command string to execute (mutually exclusive with script_path).
+        script_args: Arguments to pass to the script when using script_path.
+        verbose: If True, print detailed status messages during execution.
+    
+    Returns:
+        A string containing the combined output from stdout and stderr.
+    
+    Raises:
+        SMBConnectionError: If the connection to the target host fails.
+        SMBAuthenticationError: If authentication fails due to invalid credentials.
+        ValueError: If neither script_path nor command is provided.
     """
-    # Determine what to execute
-    if script_path:
-        if verbose:
-            print(f"[*] Reading local script: {script_path}")
-        copy_file = script_path
-        # Pass args as a named parameter to the script, quoted properly
-        if script_args:
-            cmd_args = f"{script_args}"
-        else:
-            cmd_args = ""
-    elif command:
-        if verbose:
-            print(f"[*] Executing command: {command}")
-        copy_file = None
-        cmd_args = f'powershell.exe -Command "{command}"'
-    else:
-        raise ValueError("Either --script or --command must be provided")
-
-    # Set up logging
+    
+    # Extract domain from username if in DOMAIN\username format
+    if '\\' in username:
+        domain, username = username.split('\\', 1)
+    
+    # Suppress impacket's verbose logging before any operations
+    impacket_logger = logging.getLogger('impacket')
+    impacket_logger.setLevel(logging.CRITICAL + 1)  # Effectively disable all impacket logging
+    
     if verbose:
-        logging.basicConfig(level=logging.INFO)
-    else:
-        logging.basicConfig(level=logging.CRITICAL)
+        logging.info(f"Preparing to execute on {target_ip} as {domain}\\{username}")
+        impacket_logger.setLevel(logging.INFO)
 
-    # Create string binding for RPC transport
+    # Perform a quick connectivity check before attempting SMB.
+    # This prevents long timeout delays when the target is unreachable.
+    if not check_port_open(target_ip, 445, timeout=5):
+        raise SMBConnectionError(f"Port 445 not reachable on {target_ip}")
+    
+    script_name = None
+    unInstalled = False
+
+    if verbose:
+        logging.basicConfig(level=logging.INFO, force=True)
+    else:
+        logging.basicConfig(level=logging.ERROR, force=True)
+
     stringbinding = r'ncacn_np:%s[\pipe\svcctl]' % target_ip
     if verbose:
         logging.debug(f'StringBinding {stringbinding}')
@@ -42,125 +156,346 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
     rpctransport.set_dport(445)
     rpctransport.setRemoteHost(target_ip)
     
-    # Set credentials
     if hasattr(rpctransport, 'set_credentials'):
         rpctransport.set_credentials(username, password, domain, '', '')
 
-    # Get DCE RPC connection
     dce = rpctransport.get_dce_rpc()
-    
     try:
         dce.connect()
     except Exception as e:
         if verbose:
-            logging.critical(str(e))
+            logging.error(f"Failed to connect to {target_ip} via SMB: {e}")
         raise
+    
 
     try:
         s = rpctransport.get_smb_connection()
         s.setTimeout(100000)
-        
-        # Install the service
-        if copy_file:
-            try:
-                f = open(copy_file, 'rb')
-            except Exception as e:
-                if verbose:
-                    logging.critical(str(e))
-                raise
-            installService = serviceinstall.ServiceInstall(s, f, "RunBetterService", "RunBetter.exe")
-        else:
-            installService = serviceinstall.ServiceInstall(s, remcomsvc.RemComSvc(), "RunBetterService", "RunBetter.exe")
 
+        dialect = s.getDialect()
+        
+        # Use dynamic service name to avoid conflicts
+        service_name = f"TomoeService_{random.randint(10000, 99999)}"
+        installService = serviceinstall.ServiceInstall(s, remcomsvc.RemComSvc(), service_name, "TomoeSMB.exe")
+        if verbose:
+            logging.info(f"Using service name: {service_name}")
+
+        # Clean up any existing service
+        if verbose:
+            logging.info("Checking for existing TomoeService...")
+        try:
+            installService.uninstall()
+            time.sleep(2)
+        except:
+            pass
+
+        if verbose:
+            logging.info("Installing fresh TomoeService...")
         if not installService.install():
             raise Exception("Failed to install service")
 
-        if copy_file:
-            f.close()
-            # Copy the file to the remote share
-            installService.copy_file(copy_file, installService.getShare(), os.path.basename(copy_file))
-            # Update command to execute the copied file
-            if copy_file.lower().endswith('.ps1'):
-                cmd_args = f'powershell.exe -ExecutionPolicy Bypass -file \\\\127.0.0.1\\{installService.getShare()}\\{os.path.basename(copy_file)} "{cmd_args}"'
-            else:
-                cmd_args = os.path.basename(copy_file) + ' ' + cmd_args
+        # Build command
+        if command:
+            # Format output with full names - no truncation
+            cmd_args = f'powershell.exe -NoProfile -NonInteractive -Command "{command} | Format-Table -AutoSize -Wrap | Out-String -Width 4096"'
+        elif script_path:
+            script_name = os.path.basename(script_path)
+            installService.copy_file(script_path, installService.getShare(), script_name)
+            
+            # Execute directly from SMB share using UNC path
+            unc_path = f"\\\\{target_ip}\\{installService.getShare()}\\{script_name}"
+            cmd_args = f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{unc_path}" {script_args}'
+        else:
+            raise ValueError("Either command or script_path is required")
 
-        # Connect to IPC$ share and open RemCom communication pipe
+        if verbose:
+            logging.info(f"Command to execute: {cmd_args}")
+
+        # Open communication pipe
         tid = s.connectTree('IPC$')
-        fid_main = s.openFile(tid, r'\RemCom_communicaton', 0x12019f)
+        fid_main = openPipe(s, tid, r'\RemCom_communicaton', 0x12019f)
 
-        # Create RemCom message
-        from impacket.structure import Structure
-        
-        class RemComMessage(Structure):
-            structure = (
-                ('Command','4096s=""'),
-                ('WorkingDir','260s=""'),
-                ('Priority','<L=0x20'),
-                ('ProcessID','<L=0x01'),
-                ('Machine','260s=""'),
-                ('NoWait','<L=0'),
-            )
-
-        class RemComResponse(Structure):
-            structure = (
-                ('ErrorCode','<L=0'),
-                ('ReturnCode','<L=0'),
-            )
-
+        # Create packet with command
         packet = RemComMessage()
-        pid = os.getpid()
-        import random
-        import string
         packet['Machine'] = ''.join([random.choice(string.ascii_letters) for _ in range(4)])
         packet['WorkingDir'] = ''
         packet['Command'] = cmd_args
-        packet['ProcessID'] = pid
+        packet['ProcessID'] = os.getpid()
 
-        # Send command
+        if verbose:
+            logging.info("Starting pipe threads...")
+
+        stdin_pipe = RemoteStdInPipe(rpctransport,
+            r'\%s%s%d' % (RemComSTDIN, packet['Machine'], packet['ProcessID']),
+            smb.FILE_WRITE_DATA | smb.FILE_APPEND_DATA, installService.getShare(),
+            dialect
+        )
+        stdout_pipe = RemoteStdOutPipe(
+            rpctransport,
+            r'\%s%s%d' % (RemComSTDOUT, packet['Machine'], packet['ProcessID']),
+            smb.FILE_READ_DATA,
+            dialect
+        )
+        stderr_pipe = RemoteStdErrPipe(
+            rpctransport,
+            r'\%s%s%d' % (RemComSTDERR, packet['Machine'], packet['ProcessID']),
+            smb.FILE_READ_DATA,
+            dialect
+        )
+        
+        stdin_pipe.start()
+        stdout_pipe.start()
+        stderr_pipe.start()
+
+        if verbose:
+            logging.info("Sending command to RemCom service...")
         s.writeNamedPipe(tid, fid_main, packet.getData())
 
-        # Read response
+        # Block until response
+        if verbose:
+            logging.info("Reading command response...")
         ans = s.readNamedPipe(tid, fid_main, 8)
-        
-        stdout_text = ''
-        stderr_text = ''
         
         if len(ans):
             retCode = RemComResponse(ans)
             if verbose:
-                logging.info(f"Process {cmd_args} finished with ErrorCode: {retCode['ErrorCode']}, ReturnCode: {retCode['ReturnCode']}")
-            
-            error_code = retCode['ErrorCode']
-            return_code = retCode['ReturnCode']
+                logging.info(f"Process finished with ErrorCode: {retCode['ErrorCode']}, ReturnCode: {retCode['ReturnCode']}")
         else:
-            error_code = 1
-            return_code = None
+            retCode = RemComResponse()
+
+        # Adaptively wait for pipes to capture output - detect when output stops flowing
+        idle_count = 0
+        prev_stdout_len = 0
+        prev_stderr_len = 0
+        start = time.time()
+        max_wait = 10
+        
+        if verbose:
+            logging.info("Waiting for output capture...")
+        
+        while time.time() - start < max_wait and idle_count < 2:
+            curr_stdout = len(stdout_pipe.output)
+            curr_stderr = len(stderr_pipe.output)
+            if curr_stdout == prev_stdout_len and curr_stderr == prev_stderr_len:
+                idle_count += 1
+            else:
+                idle_count = 0
+            prev_stdout_len = curr_stdout
+            prev_stderr_len = curr_stderr
+            time.sleep(0.5)
+        
+        if verbose:
+            logging.info(f"Output capture complete (waited {time.time() - start:.1f}s)")
+        
+        # Signal threads to stop
+        stdin_pipe.stop.set()
+        stdout_pipe.stop.set()
+        stderr_pipe.stop.set()
+        
+        # Give threads a moment to process the stop signal
+        time.sleep(0.1)
+        
+        # Join threads with timeout to ensure proper cleanup
+        stdin_pipe.join(5.0)
+        stdout_pipe.join(5.0)
+        stderr_pipe.join(5.0)
+        
+        # Collect output from pipes and strip carriage returns
+        stdout_text = b"".join(stdout_pipe.output).decode(CODEC, errors="replace").replace('\r', '').strip() if stdout_pipe.output else ""
+        stderr_text = b"".join(stderr_pipe.output).decode(CODEC, errors="replace").replace('\r', '').strip() if stderr_pipe.output else ""
+        
+        if verbose:
+            logging.info(f"Output captured: stdout={len(stdout_text)} chars, stderr={len(stderr_text)} chars")
 
         # Cleanup
         installService.uninstall()
-        if copy_file:
+        uninstalled = True
+        
+        if script_name:
             try:
-                s.deleteFile(installService.getShare(), os.path.basename(copy_file))
-            except Exception:
+                s.deleteFile(installService.getShare(), script_name)
+            except:
                 pass
 
-        # Return stdout (stderr would need pipe handling for full implementation)
-        # For now, return empty string as stdout since we're not capturing it via pipes
-        return stdout_text or ""
+        # Validate command execution and provide meaningful error messages
+        if stderr_text and ("is not recognized" in stderr_text or "cannot be loaded" in stderr_text):
+            if verbose:
+                logging.error(f"Command execution failed: {stderr_text}")
+            return f"ERROR: {stderr_text}"
+        
+        if not stdout_text and not stderr_text and retCode['ReturnCode'] != 0:
+            error_msg = f"Command failed with return code {retCode['ReturnCode']}"
+            if verbose:
+                logging.error(error_msg)
+            return error_msg
+        
+        # Return combined output: stdout first, then stderr, preserving all streams
+        if stdout_text and stderr_text:
+            return stdout_text + "\n" + stderr_text
+        if stdout_text:
+            return stdout_text
+        if stderr_text:
+            return stderr_text
+        return f"Command executed with ErrorCode: {retCode['ErrorCode']}"
 
     except Exception as e:
         if verbose:
-            logging.error(f"PsExec execution failed: {e}")
-        # Try to cleanup on error
-        try:
-            installService.uninstall()
-            if copy_file:
+            logging.error(f"SMB execution failed: {e}")
+        if not unInstalled:
+            try:
+                installService.uninstall()
+            except:
+                pass
+            if script_name:
                 try:
-                    s.deleteFile(installService.getShare(), os.path.basename(copy_file))
-                except Exception:
+                    s.deleteFile(installService.getShare(), script_name)
+                except:
                     pass
-        except Exception:
-            pass
         raise
 
+
+class Pipes(Thread):
+    def __init__(self, transport, pipe, permissions, share=None, dialect=None):
+        Thread.__init__(self)
+        self.server = 0
+        self.transport = transport
+        self.credentials = transport.get_credentials()
+        self.tid = 0
+        self.fid = 0
+        self.share = share
+        self.port = transport.get_dport()
+        self.pipe = pipe
+        self.permissions = permissions
+        self.daemon = True
+        self.stop = Event()
+        self.max_runtime = 300  # 5 minute timeout per pipe
+        self.start_time = None
+        self.dialect = dialect
+
+    def connectPipe(self):
+        try:
+            lock.acquire()
+            self.server = SMBConnection(self.transport.get_smb_connection().getRemoteName(), self.transport.get_smb_connection().getRemoteHost(),
+                                        sess_port=self.port, preferredDialect=self.dialect)
+            user, passwd, domain, lm, nt, aesKey, TGT, TGS = self.credentials
+            if self.transport.get_kerberos() is True:
+                self.server.kerberosLogin(user, passwd, domain, lm, nt, aesKey, kdcHost=self.transport.get_kdcHost(), TGT=TGT, TGS=TGS)
+            else:
+                self.server.login(user, passwd, domain, lm, nt)
+            lock.release()
+            self.tid = self.server.connectTree('IPC$')
+
+            # Wait for pipe with retry logic
+            pipeReady = False
+            tries = 50
+            while pipeReady is False and tries > 0:
+                try:
+                    self.server.waitNamedPipe(self.tid, self.pipe)
+                    pipeReady = True
+                except:
+                    tries -= 1
+                    time.sleep(2)
+                    pass
+            
+            if tries == 0:
+                logging.error(f'Pipe {self.pipe} not ready after {50*2}s, aborting')
+                raise Exception(f'Pipe {self.pipe} not ready, aborting')
+            
+            self.fid = self.server.openFile(self.tid, self.pipe, self.permissions, creationOption=0x40, fileAttributes=0x80)
+            self.server.setTimeout(1000000)
+            self.start_time = time.time()
+            logging.debug(f"Pipe {self.pipe} connected successfully")
+        except Exception as e:
+            logging.error(f"Failed to connect to pipe {self.pipe}: {e}")
+            if logging.getLogger().level == logging.DEBUG:
+                import traceback
+                traceback.print_exc()
+            raise
+
+
+
+class RemoteStdOutPipe(Pipes):
+    def __init__(self, transport, pipe, permisssions, dialect=None):
+        Pipes.__init__(self, transport, pipe, permisssions, dialect=dialect)
+        self.output = []
+
+    def run(self):
+        self.connectPipe()
+
+        if PY3:
+            while not self.stop.is_set():
+                # Check timeout protection inside the loop
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    break
+                try:
+                    stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
+                    if len(stdout_ans) > 0:
+                        self.output.append(stdout_ans)
+                except Exception as e:
+                    logging.debug(f"Exception reading from stdout pipe {self.pipe}: {e}")
+                    pass
+        else:
+            while not self.stop.is_set():
+                # Check timeout protection inside the loop
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    break
+                try:
+                    stdout_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
+                    if len(stdout_ans) > 0:
+                        data = stdout_ans if isinstance(stdout_ans, bytes) else stdout_ans.encode(CODEC)
+                        self.output.append(data)
+                except Exception as e:
+                    logging.debug(f"Exception reading from stdout pipe {self.pipe}: {e}")
+                    pass
+
+
+class RemoteStdErrPipe(Pipes):
+    def __init__(self, transport, pipe, permisssions, dialect=None):
+        Pipes.__init__(self, transport, pipe, permisssions, dialect=dialect)
+        self.output = []
+
+    def run(self):
+        self.connectPipe()
+
+        if PY3:
+            while not self.stop.is_set():
+                # Check timeout protection inside the loop
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    break
+                try:
+                    stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
+                    if len(stderr_ans) > 0:
+                        self.output.append(stderr_ans)
+                except Exception as e:
+                    logging.debug(f"Exception reading from stderr pipe {self.pipe}: {e}")
+                    pass
+        else:
+            while not self.stop.is_set():
+                # Check timeout protection inside the loop
+                if self.start_time and (time.time() - self.start_time) > self.max_runtime:
+                    logging.warning(f"Pipe {self.pipe} exceeded max runtime of {self.max_runtime}s")
+                    break
+                try:
+                    stderr_ans = self.server.readFile(self.tid, self.fid, 0, 1024)
+                    if len(stderr_ans) > 0:
+                        data = stderr_ans if isinstance(stderr_ans, bytes) else stderr_ans.encode(CODEC)
+                        self.output.append(data)
+                except Exception as e:
+                    logging.debug(f"Exception reading from stderr pipe {self.pipe}: {e}")
+                    pass
+
+
+
+class RemoteStdInPipe(Pipes):
+    def __init__(self, transport, pipe, permisssions, share=None, dialect=None):
+        self.shell = None
+        Pipes.__init__(self, transport, pipe, permisssions, share, dialect)
+
+    def run(self):
+        self.connectPipe()
+        # Non-interactive mode - just keep pipe open
+        while not self.stop.is_set():
+            time.sleep(1)
