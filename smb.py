@@ -138,7 +138,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
     if verbose:
         logging.basicConfig(level=logging.INFO, force=True)
     else:
-        logging.disable(logging.CRITICAL)
+        logging.basicConfig(level=logging.ERROR, force=True)
 
     stringbinding = r'ncacn_np:%s[\pipe\svcctl]' % target_ip
     if verbose:
