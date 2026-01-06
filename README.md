@@ -150,7 +150,8 @@ This will place the contents of that directory in whatever directory you specifi
     Copied 2 file(s) (26 bytes) to \\192.168.56.22\C$\
 ```
 
-<IMG HERE>
+<img width="1406" height="791" alt="image" src="https://github.com/user-attachments/assets/47e15031-5cd7-4ac7-b4af-3bcb40e060ec" />
+
 
 You can also specify a new directory to create to output files to. For example, this will create a new folder "Test2" and put the contents of "Test" inside of it. This works with both protocols.
 
