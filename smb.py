@@ -309,7 +309,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
 
         # Cleanup
         installService.uninstall()
-        uninstalled = True
+        unInstalled = True
         
         if script_name:
             try:
@@ -375,14 +375,16 @@ class Pipes(Thread):
     def connectPipe(self):
         try:
             lock.acquire()
-            self.server = SMBConnection(self.transport.get_smb_connection().getRemoteName(), self.transport.get_smb_connection().getRemoteHost(),
-                                        sess_port=self.port, preferredDialect=self.dialect)
-            user, passwd, domain, lm, nt, aesKey, TGT, TGS = self.credentials
-            if self.transport.get_kerberos() is True:
-                self.server.kerberosLogin(user, passwd, domain, lm, nt, aesKey, kdcHost=self.transport.get_kdcHost(), TGT=TGT, TGS=TGS)
-            else:
-                self.server.login(user, passwd, domain, lm, nt)
-            lock.release()
+            try:
+                self.server = SMBConnection(self.transport.get_smb_connection().getRemoteName(), self.transport.get_smb_connection().getRemoteHost(),
+                                            sess_port=self.port, preferredDialect=self.dialect)
+                user, passwd, domain, lm, nt, aesKey, TGT, TGS = self.credentials
+                if self.transport.get_kerberos() is True:
+                    self.server.kerberosLogin(user, passwd, domain, lm, nt, aesKey, kdcHost=self.transport.get_kdcHost(), TGT=TGT, TGS=TGS)
+                else:
+                    self.server.login(user, passwd, domain, lm, nt)
+            finally:
+                lock.release()
             self.tid = self.server.connectTree('IPC$')
 
             # Wait for pipe with retry logic

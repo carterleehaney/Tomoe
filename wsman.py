@@ -1,6 +1,8 @@
+import os
 import socket
 from pypsrp.powershell import PowerShell, RunspacePool
 from pypsrp.wsman import WSMan
+from pypsrp.client import Client
 
 
 class WinRMAuthenticationError(Exception):
@@ -196,4 +198,214 @@ def run_winrm(target_ip, username, password, domain="", script_path=None, comman
         # For any other exception, log it in verbose mode and re-raise.
         if verbose:
             print(f"[!] WinRM execution failed: {e}")
+        raise
+
+
+def run_winrm_copy(target_ip, username, password, domain="", source="", dest="", verbose=False):
+    """
+    Copy a local file or directory to a remote Windows host using WinRM/PSRP.
+    
+    This function uses the pypsrp library's Client class to upload files via
+    the PowerShell Remoting Protocol. It supports both single file uploads
+    and recursive directory uploads.
+    
+    Args:
+        target_ip: The IP address or hostname of the remote Windows machine.
+        username: The username for authentication (can be in DOMAIN\\username format).
+        password: The password for authentication.
+        domain: Optional domain name for domain-joined authentication.
+        source: Path to the local file or directory to copy.
+        dest: Remote destination as a local Windows path (e.g., "C:\\Windows\\Temp\\file.exe").
+        verbose: If True, print detailed status messages during execution.
+    
+    Returns:
+        A string containing a success message with files/bytes transferred.
+    
+    Raises:
+        WinRMConnectionError: If the connection to the target host fails.
+        WinRMAuthenticationError: If authentication fails due to invalid credentials.
+        FileNotFoundError: If the source file/directory does not exist.
+    """
+    
+    # Perform a quick connectivity check before attempting WinRM.
+    if not check_port_open(target_ip, 5985, timeout=5):
+        raise WinRMConnectionError(f"Port 5985 not reachable on {target_ip}")
+    
+    # Validate source exists
+    if not os.path.exists(source):
+        raise FileNotFoundError(f"Source not found: {source}")
+    
+    # Construct the authentication username.
+    if domain:
+        auth_username = f"{domain}\\{username}"
+    else:
+        auth_username = username
+    
+    try:
+        # Create a pypsrp Client for file operations - must use as context manager
+        with Client(
+            target_ip,
+            username=auth_username,
+            password=password,
+            port=5985,
+            ssl=False,
+            auth="ntlm",
+            encryption="auto",
+            connection_timeout=30,
+            read_timeout=30,
+        ) as client:
+            # Check if source is a file or directory
+            if os.path.isfile(source):
+                # Single file copy - mimic SMB behavior
+                file_size = os.path.getsize(source)
+                
+                # Normalize destination path and parse like SMB does
+                dest_normalized = dest.replace('/', '\\').lstrip('\\')
+                
+                # Extract drive letter and path (e.g., "C:\path" -> drive="C:", path="path")
+                if len(dest_normalized) >= 2 and dest_normalized[1] == ':':
+                    drive = dest_normalized[:2]  # "C:"
+                    path_after_drive = dest_normalized[3:] if len(dest_normalized) > 3 else ""
+                    
+                    # If path after drive is empty (just "C:\"), use source filename
+                    # This mimics SMB behavior: remote_path = remote_base_path if remote_base_path else os.path.basename(source)
+                    if path_after_drive:
+                        remote_path = dest_normalized
+                    else:
+                        remote_path = drive + '\\' + os.path.basename(source)
+                else:
+                    # No drive letter, use as-is
+                    remote_path = dest_normalized if dest_normalized else os.path.basename(source)
+                
+                if verbose:
+                    print(f"[*] Uploading {source} ({file_size} bytes) to {target_ip}:{remote_path}...")
+                
+                # client.copy() takes file paths as strings, not file objects
+                client.copy(source, remote_path)
+                
+                if verbose:
+                    print(f"[+] File copied successfully: {file_size} bytes")
+                
+                return f"Copied {os.path.basename(source)} ({file_size} bytes) to {target_ip}:{remote_path}"
+            
+            else:
+                # Directory copy - recursive
+                # Note: pypsrp Client doesn't maintain connection well across multiple copy() calls
+                # So we handle directory copy outside the context manager
+                pass
+        
+        # Directory copy - need to handle separately due to pypsrp connection issues
+        if os.path.isdir(source):
+            total_files = 0
+            total_bytes = 0
+            
+            # Normalize destination path
+            dest_normalized = dest.replace('/', '\\').rstrip('\\')
+            
+            # Collect all directories to create and files to copy
+            dirs_to_create = []
+            files_to_copy = []
+            
+            for root, dirs, files in os.walk(source):
+                rel_root = os.path.relpath(root, source)
+                if rel_root == ".":
+                    rel_root = ""
+                
+                if rel_root:
+                    remote_dir = dest_normalized + "\\" + rel_root.replace('/', '\\')
+                else:
+                    remote_dir = dest_normalized
+                
+                if remote_dir and remote_dir not in dirs_to_create:
+                    dirs_to_create.append(remote_dir)
+                
+                for filename in files:
+                    local_file_path = os.path.join(root, filename)
+                    if remote_dir:
+                        remote_file_path = remote_dir + "\\" + filename
+                    else:
+                        remote_file_path = filename
+                    files_to_copy.append((local_file_path, remote_file_path))
+            
+            # Create all directories first with a single client connection
+            if dirs_to_create:
+                with Client(
+                    target_ip,
+                    username=auth_username,
+                    password=password,
+                    port=5985,
+                    ssl=False,
+                    auth="ntlm",
+                    encryption="auto",
+                    connection_timeout=30,
+                    read_timeout=30,
+                ) as client:
+                    for remote_dir in dirs_to_create:
+                        mkdir_script = f"New-Item -ItemType Directory -Path '{remote_dir}' -Force | Out-Null"
+                        try:
+                            client.execute_ps(mkdir_script)
+                            if verbose:
+                                print(f"[*] Created directory: {remote_dir}")
+                        except Exception:
+                            pass
+            
+            # Copy each file with a fresh client connection
+            for local_file_path, remote_file_path in files_to_copy:
+                file_size = os.path.getsize(local_file_path)
+                
+                if verbose:
+                    print(f"[*] Uploading {local_file_path} ({file_size} bytes) to {target_ip}:{remote_file_path}...")
+                
+                with Client(
+                    target_ip,
+                    username=auth_username,
+                    password=password,
+                    port=5985,
+                    ssl=False,
+                    auth="ntlm",
+                    encryption="auto",
+                    connection_timeout=30,
+                    read_timeout=30,
+                ) as client:
+                    client.copy(local_file_path, remote_file_path)
+                
+                total_files += 1
+                total_bytes += file_size
+            
+            if verbose:
+                print(f"[+] Directory copied successfully: {total_files} files, {total_bytes} bytes")
+            
+            return f"Copied {total_files} file(s) ({total_bytes} bytes) to {target_ip}:{dest_normalized}"
+    
+    except Exception as e:
+        error_str = str(e).lower()
+        
+        # Check if this is a file/path access error (not an auth error)
+        # These errors occur after successful authentication
+        if "failed to copy file" in error_str or "access to the path" in error_str:
+            if verbose:
+                print(f"[!] WinRM copy failed: {e}")
+            raise
+        
+        # Check if the exception indicates an authentication failure.
+        # Be specific to avoid misclassifying file access errors
+        if any(auth_err in error_str for auth_err in [
+            "failed to authenticate", "unauthorized", "401", "logon_failure",
+            "invalid credentials", "credentials were rejected"
+        ]):
+            if verbose:
+                print(f"[!] WinRM authentication failed: {e}")
+            raise WinRMAuthenticationError(f"Authentication failed for {username}@{target_ip}: {e}")
+        
+        # Check if the exception indicates a connection failure.
+        if any(conn_err in error_str for conn_err in [
+            "connection", "timeout", "refused", "unreachable", "reset"
+        ]):
+            if verbose:
+                print(f"[!] WinRM connection failed: {e}")
+            raise WinRMConnectionError(f"Connection failed to {target_ip}: {e}")
+        
+        # For any other exception, log it in verbose mode and re-raise.
+        if verbose:
+            print(f"[!] WinRM copy failed: {e}")
         raise

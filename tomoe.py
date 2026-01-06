@@ -11,7 +11,7 @@ from rich.live import Live
 from rich.table import Table
 
 from smb import run_psexec, run_smb_copy
-from wsman import run_winrm
+from wsman import run_winrm, run_winrm_copy
 
 
 @dataclass
@@ -135,6 +135,24 @@ def execute_on_host(
                         command=command,
                         script_args=script_args,
                         verbose=verbose,
+                    )
+                elif protocol == "winrm" and source and dest:
+                    output = run_winrm_copy(
+                        target_ip=host,
+                        username=username,
+                        password=password,
+                        domain=domain,
+                        source=source,
+                        dest=dest,
+                        verbose=verbose,
+                    )
+                    update_status("success", username, "File copied.")
+                    return HostResult(
+                        host=host,
+                        success=True,
+                        username=username,
+                        message="File copied successfully.",
+                        output=output
                     )
                 elif protocol == "winrm":
                     output = run_winrm(
@@ -338,8 +356,8 @@ if __name__ == "__main__":
     exec_group.add_argument("-s", "--script", help="local path to PowerShell script to execute")
     exec_group.add_argument("-c", "--command", help="powershell command to execute")
     
-    # File copy arguments (for smb protocol file transfer).
-    parser.add_argument("--source", help="local path to file or directory to copy via SMB (use with --dest)")
+    # File copy arguments (for smb/winrm protocol file transfer).
+    parser.add_argument("--source", help="local path to file or directory to copy (use with --dest)")
     parser.add_argument("--dest", help="remote destination as local Windows path, e.g. C:\\Windows\\Temp\\file.exe (use with --source)")
     
     # Arguments to pass to the script.
@@ -353,8 +371,6 @@ if __name__ == "__main__":
     # Validate arguments based on protocol and operation mode.
     if args.source or args.dest:
         # File/directory copy mode
-        if args.protocol != "smb":
-            parser.error("--source and --dest are only supported with the smb protocol")
         if not args.source or not args.dest:
             parser.error("both --source and --dest are required for file copy")
         if not exists(args.source):
