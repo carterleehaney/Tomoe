@@ -1,7 +1,7 @@
 import argparse
 import logging
 import time
-from os.path import isfile
+from os.path import isfile, isdir, exists
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from threading import Lock, Thread, Event
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from smb import run_psexec
+from smb import run_psexec, run_smb_copy
 from wsman import run_winrm
 
 
@@ -84,7 +84,9 @@ def execute_on_host(
     script_args: str,
     verbose: bool,
     host_statuses: dict[str, HostStatus],
-    status_lock: Lock
+    status_lock: Lock,
+    source: Optional[str] = None,
+    dest: Optional[str] = None
 ) -> HostResult:
     """Execute command on a single host, trying credential permutations until success."""
     
@@ -104,7 +106,26 @@ def execute_on_host(
             update_status("trying", username, f"Authenticating...")
             
             try:
-                if protocol == "smb":
+                # Check if this is a file copy operation (smb with --source/--dest)
+                if protocol == "smb" and source and dest:
+                    output = run_smb_copy(
+                        target_ip=host,
+                        username=username,
+                        password=password,
+                        domain=domain,
+                        source=source,
+                        dest=dest,
+                        verbose=verbose,
+                    )
+                    update_status("success", username, "File copied.")
+                    return HostResult(
+                        host=host,
+                        success=True,
+                        username=username,
+                        message="File copied successfully.",
+                        output=output
+                    )
+                elif protocol == "smb":
                     output = run_psexec(
                         target_ip=host,
                         username=username,
@@ -179,7 +200,9 @@ def run_concurrent_execution(
     command: Optional[str],
     script_args: str,
     verbose: bool,
-    max_workers: int = 10
+    max_workers: int = 10,
+    source: Optional[str] = None,
+    dest: Optional[str] = None
 ) -> list[HostResult]:
     """Run execution concurrently across all hosts with live status display."""
     
@@ -223,7 +246,9 @@ def run_concurrent_execution(
                         script_args,
                         verbose,
                         host_statuses,
-                        status_lock
+                        status_lock,
+                        source,
+                        dest
                     ): host
                     for host in hosts
                 }
@@ -279,10 +304,27 @@ def print_results(results: list[HostResult], console: Console):
     console.print(f"\n[bold]Summary:[/bold] {success_count}/{len(results)} hosts successful")
 
 
+def write_output_files(results: list[HostResult], output_dir: str, console: Console):
+    """Write output files for successful hosts to the specified directory."""
+    import os
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    written_count = 0
+    for result in results:
+        if result.success and result.output:
+            file_path = os.path.join(output_dir, f"{result.host}.txt")
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(result.output)
+            written_count += 1
+    
+    console.print(f"[bold]Output:[/bold] Wrote {written_count} file(s) to {output_dir}/")
+
+
 if __name__ == "__main__":
     # Parse arguments.
     parser = argparse.ArgumentParser(
-        usage="tomoe.py {winrm, smb} -i <ip/file> -u <username/file> -p <password/file> --script <script> --command <command> --args <args> -v",
+        usage="tomoe.py {smb, winrm} -i <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --source <file> --dest <path>] -v",
         description="Tomoe is a python utility for cross-platform windows administration over multiple protocols in case of fail-over."
     )
     parser.add_argument("protocol", choices=["smb", "winrm"], help="protocol to use for remote administration")
@@ -292,16 +334,37 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--password", required=True, help="password or path to file with passwords (one per line)")
 
     # Script or Command; but never both.
-    exec_group = parser.add_mutually_exclusive_group(required=True)
+    exec_group = parser.add_mutually_exclusive_group(required=False)
     exec_group.add_argument("-s", "--script", help="local path to PowerShell script to execute")
     exec_group.add_argument("-c", "--command", help="powershell command to execute")
+    
+    # File copy arguments (for smb protocol file transfer).
+    parser.add_argument("--source", help="local path to file or directory to copy via SMB (use with --dest)")
+    parser.add_argument("--dest", help="remote destination as local Windows path, e.g. C:\\Windows\\Temp\\file.exe (use with --source)")
     
     # Arguments to pass to the script.
     parser.add_argument("-a", "--args", default="", help="arguments to pass to the script")
     parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
     parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
+    parser.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
 
     args = parser.parse_args()
+    
+    # Validate arguments based on protocol and operation mode.
+    if args.source or args.dest:
+        # File/directory copy mode
+        if args.protocol != "smb":
+            parser.error("--source and --dest are only supported with the smb protocol")
+        if not args.source or not args.dest:
+            parser.error("both --source and --dest are required for file copy")
+        if not exists(args.source):
+            parser.error(f"source not found: {args.source}")
+        if args.script or args.command:
+            parser.error("--source/--dest cannot be used with --script or --command")
+    else:
+        # Command execution mode
+        if not args.script and not args.command:
+            parser.error("either --script, --command, or --source/--dest is required")
     
     # Set logging level based on verbose flag.
     if args.verbose:
@@ -332,8 +395,14 @@ if __name__ == "__main__":
         command=args.command,
         script_args=args.args,
         verbose=args.verbose,
-        max_workers=args.threads
+        max_workers=args.threads,
+        source=args.source,
+        dest=args.dest
     )
     
     # Print final results.
     print_results(results, console)
+    
+    # Write output files if output directory specified.
+    if args.output:
+        write_output_files(results, args.output, console)

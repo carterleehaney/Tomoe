@@ -499,3 +499,188 @@ class RemoteStdInPipe(Pipes):
         # Non-interactive mode - just keep pipe open
         while not self.stop.is_set():
             time.sleep(1)
+
+
+def run_smb_copy(target_ip, username, password, domain="", source="", dest="", verbose=False):
+    """
+    Copy a local file or directory to a remote Windows host using SMB.
+    
+    This function establishes an SMB connection and uploads a file or directory
+    from the local system to a specified path on the remote host. If the source
+    is a directory, it recursively copies all files and subdirectories.
+    
+    Args:
+        target_ip: The IP address or hostname of the remote Windows machine.
+        username: The username for authentication (can be in DOMAIN\\username format).
+        password: The password for authentication.
+        domain: Optional domain name for domain-joined authentication.
+        source: Path to the local file or directory to copy.
+        dest: Remote destination as a local Windows path (e.g., "C:\\Windows\\Temp\\folder").
+        verbose: If True, print detailed status messages during execution.
+    
+    Returns:
+        A string containing a success message with files/bytes transferred.
+    
+    Raises:
+        SMBConnectionError: If the connection to the target host fails.
+        SMBAuthenticationError: If authentication fails due to invalid credentials.
+        FileNotFoundError: If the source file/directory does not exist.
+        ValueError: If the destination path format is invalid.
+    """
+    
+    # Extract domain from username if in DOMAIN\username format
+    if '\\' in username:
+        domain, username = username.split('\\', 1)
+    
+    # Suppress impacket's verbose logging before any operations
+    impacket_logger = logging.getLogger('impacket')
+    impacket_logger.setLevel(logging.CRITICAL + 1)
+    
+    if verbose:
+        logging.info(f"Preparing to copy to {target_ip} as {domain}\\{username}")
+        impacket_logger.setLevel(logging.INFO)
+    
+    # Validate source exists
+    if not os.path.exists(source):
+        raise FileNotFoundError(f"Source not found: {source}")
+    
+    # Parse destination as a local Windows path (e.g., "C:\Windows\Temp\file.exe")
+    # Convert to SMB path using C$ share
+    dest_normalized = dest.replace('/', '\\')
+    
+    # Remove leading backslashes if present
+    dest_normalized = dest_normalized.lstrip('\\')
+    
+    # Expect format like "C:\path\to\file" - extract drive letter and path
+    if len(dest_normalized) < 3 or dest_normalized[1] != ':':
+        raise ValueError(f"Invalid destination format. Expected Windows path like 'C:\\path\\to\\file', got: {dest}")
+    
+    # Use C$ admin share
+    share = "C$"
+    # Remove "C:\" prefix to get the path relative to the share
+    remote_base_path = dest_normalized[3:] if len(dest_normalized) > 3 else ""
+    
+    if verbose:
+        logging.info(f"Share: {share}, Remote base path: {remote_base_path}")
+    
+    # Perform a quick connectivity check before attempting SMB
+    if not check_port_open(target_ip, 445, timeout=5):
+        raise SMBConnectionError(f"Port 445 not reachable on {target_ip}")
+    
+    try:
+        # Establish SMB connection
+        if verbose:
+            logging.info(f"Connecting to {target_ip}...")
+        
+        smb_connection = SMBConnection(target_ip, target_ip, timeout=30)
+        
+        # Authenticate
+        if verbose:
+            logging.info(f"Authenticating as {domain}\\{username}...")
+        
+        try:
+            smb_connection.login(username, password, domain)
+        except Exception as e:
+            error_msg = str(e).lower()
+            auth_error_patterns = [
+                "logon_failure", "access_denied", "status_logon_failure",
+                "bad password", "wrong password", "invalid credentials"
+            ]
+            if any(pattern in error_msg for pattern in auth_error_patterns):
+                raise SMBAuthenticationError(f"Authentication failed for {username}: {e}")
+            raise
+        
+        # Check if source is a file or directory
+        if os.path.isfile(source):
+            # Single file copy
+            file_size = os.path.getsize(source)
+            remote_path = remote_base_path if remote_base_path else os.path.basename(source)
+            
+            if verbose:
+                logging.info(f"Uploading {source} ({file_size} bytes) to \\\\{target_ip}\\{share}\\{remote_path}...")
+            
+            with open(source, 'rb') as local_file:
+                smb_connection.putFile(share, remote_path, local_file.read)
+            
+            smb_connection.close()
+            
+            if verbose:
+                logging.info(f"File copied successfully: {file_size} bytes")
+            
+            return f"Copied {os.path.basename(source)} ({file_size} bytes) to \\\\{target_ip}\\{share}\\{remote_path}"
+        
+        else:
+            # Directory copy - recursive
+            total_files = 0
+            total_bytes = 0
+            
+            # Walk through all files and subdirectories
+            for root, dirs, files in os.walk(source):
+                # Calculate relative path from source directory
+                rel_root = os.path.relpath(root, source)
+                if rel_root == ".":
+                    rel_root = ""
+                
+                # Create remote directory path
+                if rel_root:
+                    remote_dir = remote_base_path + "\\" + rel_root.replace('/', '\\') if remote_base_path else rel_root.replace('/', '\\')
+                else:
+                    remote_dir = remote_base_path
+                
+                # Create remote directories (SMB createDirectory for each level)
+                if remote_dir:
+                    # Create directory hierarchy
+                    dir_parts = remote_dir.split('\\')
+                    current_path = ""
+                    for part in dir_parts:
+                        if not part:
+                            continue
+                        current_path = current_path + "\\" + part if current_path else part
+                        try:
+                            smb_connection.createDirectory(share, current_path)
+                            if verbose:
+                                logging.info(f"Created directory: \\\\{target_ip}\\{share}\\{current_path}")
+                        except Exception:
+                            # Directory may already exist, ignore
+                            pass
+                
+                # Copy each file
+                for filename in files:
+                    local_file_path = os.path.join(root, filename)
+                    if remote_dir:
+                        remote_file_path = remote_dir + "\\" + filename
+                    else:
+                        remote_file_path = filename
+                    
+                    file_size = os.path.getsize(local_file_path)
+                    
+                    if verbose:
+                        logging.info(f"Uploading {local_file_path} ({file_size} bytes) to \\\\{target_ip}\\{share}\\{remote_file_path}...")
+                    
+                    with open(local_file_path, 'rb') as f:
+                        smb_connection.putFile(share, remote_file_path, f.read)
+                    
+                    total_files += 1
+                    total_bytes += file_size
+            
+            smb_connection.close()
+            
+            if verbose:
+                logging.info(f"Directory copied successfully: {total_files} files, {total_bytes} bytes")
+            
+            return f"Copied {total_files} file(s) ({total_bytes} bytes) to \\\\{target_ip}\\{share}\\{remote_base_path}"
+    
+    except SMBAuthenticationError:
+        raise
+    except SMBConnectionError:
+        raise
+    except Exception as e:
+        error_msg = str(e).lower()
+        auth_error_patterns = [
+            "logon_failure", "access_denied", "status_logon_failure",
+            "bad password", "wrong password", "invalid credentials",
+            "authentication", "unauthorized", "rejected"
+        ]
+        if any(pattern in error_msg for pattern in auth_error_patterns):
+            raise SMBAuthenticationError(f"Authentication failed: {e}")
+        raise
