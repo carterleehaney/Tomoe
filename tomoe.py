@@ -393,6 +393,14 @@ if __name__ == "__main__":
     usernames = parse_target_or_file(args.username)
     passwords = parse_target_or_file(args.password)
     
+    # Validate that we have at least one host, username, and password.
+    if not hosts:
+        parser.error(f"no hosts found in '{args.i}' (file is empty or contains only whitespace)")
+    if not usernames:
+        parser.error(f"no usernames found in '{args.username}' (file is empty or contains only whitespace)")
+    if not passwords:
+        parser.error(f"no passwords found in '{args.password}' (file is empty or contains only whitespace)")
+    
     console = Console()
     console.print()
     console.print(f"  Targets: {len(hosts)} host(s)")

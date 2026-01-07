@@ -376,6 +376,9 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
                 print(f"[+] Directory copied successfully: {total_files} files, {total_bytes} bytes")
             
             return f"Copied {total_files} file(s) ({total_bytes} bytes) to {target_ip}:{dest_normalized}"
+        
+        # Source exists but is neither a file nor a directory (e.g., socket, FIFO, device file)
+        raise ValueError(f"Source '{source}' exists but is neither a regular file nor a directory")
     
     except Exception as e:
         error_str = str(e).lower()
