@@ -626,9 +626,9 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
             total_files = 0
             total_bytes = 0
             
-            # Pre-count total files for progress reporting
-            total_file_count = sum(len(files) for _, _, files in os.walk(source))
+            # Pre-count total files for progress reporting only when a status callback is provided
             if status_callback:
+                total_file_count = sum(len(files) for _, _, files in os.walk(source))
                 status_callback(f"Copying 0/{total_file_count} files...")
             
             # Walk through all files and subdirectories
