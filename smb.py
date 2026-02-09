@@ -96,7 +96,7 @@ def openPipe(s, tid, pipe, accessMask):
     fid = s.openFile(tid, pipe, accessMask, creationOption=0x40, fileAttributes=0x80)
     return fid
 
-def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False):
+def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None):
     """
     Execute a command or script remotely using impacket's psexec functionality over SMB.
     
@@ -113,6 +113,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         command: A PowerShell command string to execute (mutually exclusive with script_path).
         script_args: Arguments to pass to the script when using script_path.
         verbose: If True, print detailed status messages during execution.
+        status_callback: Optional callable(message) to report execution progress.
     
     Returns:
         A string containing the combined output from stdout and stderr.
@@ -167,6 +168,9 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             logging.error(f"Failed to connect to {target_ip} via SMB: {e}")
         raise
     
+    # DCE/RPC connected successfully - authentication has passed.
+    if status_callback:
+        status_callback("Authenticated, installing service...")
 
     try:
         s = rpctransport.get_smb_connection()
@@ -222,6 +226,9 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         packet['Command'] = cmd_args
         packet['ProcessID'] = os.getpid()
 
+        if status_callback:
+            status_callback("Executing...")
+        
         if verbose:
             logging.info("Starting pipe threads...")
 
@@ -503,7 +510,7 @@ class RemoteStdInPipe(Pipes):
             time.sleep(1)
 
 
-def run_smb_copy(target_ip, username, password, domain="", source="", dest="", verbose=False):
+def run_smb_copy(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None):
     """
     Copy a local file or directory to a remote Windows host using SMB.
     
@@ -519,6 +526,7 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
         source: Path to the local file or directory to copy.
         dest: Remote destination as a local Windows path (e.g., "C:\\Windows\\Temp\\folder").
         verbose: If True, print detailed status messages during execution.
+        status_callback: Optional callable(message) to report execution progress.
     
     Returns:
         A string containing a success message with files/bytes transferred.
@@ -595,6 +603,8 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
         # Check if source is a file or directory
         if os.path.isfile(source):
             # Single file copy
+            if status_callback:
+                status_callback("Copying 1 file...")
             file_size = os.path.getsize(source)
             remote_path = remote_base_path if remote_base_path else os.path.basename(source)
             
@@ -603,6 +613,9 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
             
             with open(source, 'rb') as local_file:
                 smb_connection.putFile(share, remote_path, local_file.read)
+            
+            if status_callback:
+                status_callback("Copying 1/1 files...")
             
             smb_connection.close()
             
@@ -615,6 +628,11 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
             # Directory copy - recursive
             total_files = 0
             total_bytes = 0
+            
+            # Pre-count total files for progress reporting only when a status callback is provided
+            if status_callback:
+                total_file_count = sum(len(files) for _, _, files in os.walk(source))
+                status_callback(f"Copying 0/{total_file_count} files...")
             
             # Walk through all files and subdirectories
             for root, dirs, files in os.walk(source):
@@ -664,6 +682,9 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                     
                     total_files += 1
                     total_bytes += file_size
+                    
+                    if status_callback:
+                        status_callback(f"Copying {total_files}/{total_file_count} files...")
             
             smb_connection.close()
             
