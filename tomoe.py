@@ -105,6 +105,15 @@ def execute_on_host(
         for password in passwords:
             update_status("trying", username, f"Authenticating...")
             
+            # Create a status callback that updates the live display with
+            # progress messages from the protocol functions.
+            def make_status_callback(user):
+                def callback(message):
+                    update_status("trying", user, message)
+                return callback
+            
+            status_callback = make_status_callback(username)
+            
             try:
                 # Check if this is a file copy operation (smb with --source/--dest)
                 if protocol == "smb" and source and dest:
@@ -116,6 +125,7 @@ def execute_on_host(
                         source=source,
                         dest=dest,
                         verbose=verbose,
+                        status_callback=status_callback,
                     )
                     update_status("success", username, "File copied.")
                     return HostResult(
@@ -135,6 +145,7 @@ def execute_on_host(
                         command=command,
                         script_args=script_args,
                         verbose=verbose,
+                        status_callback=status_callback,
                     )
                 elif protocol == "winrm" and source and dest:
                     output = run_winrm_copy(
@@ -145,6 +156,7 @@ def execute_on_host(
                         source=source,
                         dest=dest,
                         verbose=verbose,
+                        status_callback=status_callback,
                     )
                     update_status("success", username, "File copied.")
                     return HostResult(
@@ -164,6 +176,7 @@ def execute_on_host(
                         command=command,
                         script_args=script_args,
                         verbose=verbose,
+                        status_callback=status_callback,
                     )
                 
                 # Success!

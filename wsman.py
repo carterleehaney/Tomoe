@@ -41,7 +41,7 @@ def check_port_open(host, port=5985, timeout=5):
         return False
 
 
-def run_winrm(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False):
+def run_winrm(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None):
     """
     Execute a PowerShell script or command on a remote Windows host using WinRM.
     
@@ -60,6 +60,7 @@ def run_winrm(target_ip, username, password, domain="", script_path=None, comman
         command: A PowerShell command string to execute (mutually exclusive with script_path).
         script_args: Arguments to pass to the script when using script_path.
         verbose: If True, print detailed status messages during execution.
+        status_callback: Optional callable(message) to report execution progress.
     
     Returns:
         A string containing the combined output from all PowerShell streams.
@@ -100,6 +101,10 @@ def run_winrm(target_ip, username, password, domain="", script_path=None, comman
         # Open a RunspacePool, which represents a PowerShell execution environment.
         # The context manager ensures proper cleanup of the remote session.
         with RunspacePool(wsman) as pool:
+            # RunspacePool opened successfully - authentication has passed.
+            if status_callback:
+                status_callback("Authenticated, preparing command...")
+            
             # Create a PowerShell pipeline to execute commands within the runspace.
             ps = PowerShell(pool)
             
@@ -135,6 +140,8 @@ def run_winrm(target_ip, username, password, domain="", script_path=None, comman
             
             # Execute the PowerShell pipeline on the remote host.
             # This blocks until the script completes or an error occurs.
+            if status_callback:
+                status_callback("Executing...")
             ps.invoke()
             
             if verbose:
@@ -201,7 +208,7 @@ def run_winrm(target_ip, username, password, domain="", script_path=None, comman
         raise
 
 
-def run_winrm_copy(target_ip, username, password, domain="", source="", dest="", verbose=False):
+def run_winrm_copy(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None):
     """
     Copy a local file or directory to a remote Windows host using WinRM/PSRP.
     
@@ -217,6 +224,7 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
         source: Path to the local file or directory to copy.
         dest: Remote destination as a local Windows path (e.g., "C:\\Windows\\Temp\\file.exe").
         verbose: If True, print detailed status messages during execution.
+        status_callback: Optional callable(message) to report execution progress.
     
     Returns:
         A string containing a success message with files/bytes transferred.
@@ -257,6 +265,8 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
             # Check if source is a file or directory
             if os.path.isfile(source):
                 # Single file copy - mimic SMB behavior
+                if status_callback:
+                    status_callback("Copying 1/1 files...")
                 file_size = os.path.getsize(source)
                 
                 # Normalize destination path and parse like SMB does
@@ -296,6 +306,9 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
         
         # Directory copy - need to handle separately due to pypsrp connection issues
         if os.path.isdir(source):
+            if status_callback:
+                status_callback("Scanning directory...")
+            
             total_files = 0
             total_bytes = 0
             
@@ -328,6 +341,8 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
                     files_to_copy.append((local_file_path, remote_file_path))
             
             # Create all directories first with a single client connection
+            if status_callback:
+                status_callback(f"Creating directories, 0/{len(files_to_copy)} files copied...")
             if dirs_to_create:
                 with Client(
                     target_ip,
@@ -350,6 +365,9 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
                             pass
             
             # Copy each file with a fresh client connection
+            total_file_count = len(files_to_copy)
+            if status_callback:
+                status_callback(f"Copying 0/{total_file_count} files...")
             for local_file_path, remote_file_path in files_to_copy:
                 file_size = os.path.getsize(local_file_path)
                 
@@ -371,6 +389,9 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
                 
                 total_files += 1
                 total_bytes += file_size
+                
+                if status_callback:
+                    status_callback(f"Copying {total_files}/{total_file_count} files...")
             
             if verbose:
                 print(f"[+] Directory copied successfully: {total_files} files, {total_bytes} bytes")
