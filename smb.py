@@ -604,7 +604,7 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
         if os.path.isfile(source):
             # Single file copy
             if status_callback:
-                status_callback("Copying 1/1 files...")
+                status_callback("Copying 1 file...")
             file_size = os.path.getsize(source)
             remote_path = remote_base_path if remote_base_path else os.path.basename(source)
             
@@ -613,6 +613,9 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
             
             with open(source, 'rb') as local_file:
                 smb_connection.putFile(share, remote_path, local_file.read)
+            
+            if status_callback:
+                status_callback("Copying 1/1 files...")
             
             smb_connection.close()
             
