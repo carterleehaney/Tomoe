@@ -266,7 +266,7 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
             if os.path.isfile(source):
                 # Single file copy - mimic SMB behavior
                 if status_callback:
-                    status_callback("Copying 1/1 files...")
+                    status_callback("Copying 0/1 files...")
                 file_size = os.path.getsize(source)
                 
                 # Normalize destination path and parse like SMB does
@@ -292,6 +292,9 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
                 
                 # client.copy() takes file paths as strings, not file objects
                 client.copy(source, remote_path)
+                
+                if status_callback:
+                    status_callback("Copying 1/1 files...")
                 
                 if verbose:
                     print(f"[+] File copied successfully: {file_size} bytes")
