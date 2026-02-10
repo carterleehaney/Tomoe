@@ -427,8 +427,10 @@ def run_ssh_copy(target_ip, username, password, domain="", source="", dest="", v
                             stdout.channel.recv_exit_status()
                             if verbose:
                                 print(f"[*] Created directory (via cmd): {remote_dir}")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            # Swallow directory creation failures here; file uploads may still fail later.
+                            if verbose:
+                                print(f"[!] Failed to create directory (via cmd): {remote_dir} ({e})")
                 
                 # Copy each file.
                 total_file_count = len(files_to_copy)
