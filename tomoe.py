@@ -12,6 +12,7 @@ from rich.table import Table
 
 from smb import run_psexec, run_smb_copy
 from wsman import run_winrm, run_winrm_copy
+from ssh import run_ssh, run_ssh_copy
 
 
 @dataclass
@@ -86,7 +87,8 @@ def execute_on_host(
     host_statuses: dict[str, HostStatus],
     status_lock: Lock,
     source: Optional[str] = None,
-    dest: Optional[str] = None
+    dest: Optional[str] = None,
+    target_os: str = "windows"
 ) -> HostResult:
     """Execute command on a single host, trying credential permutations until success."""
     
@@ -178,6 +180,39 @@ def execute_on_host(
                         verbose=verbose,
                         status_callback=status_callback,
                     )
+                elif protocol == "ssh" and source and dest:
+                    output = run_ssh_copy(
+                        target_ip=host,
+                        username=username,
+                        password=password,
+                        domain=domain,
+                        source=source,
+                        dest=dest,
+                        verbose=verbose,
+                        status_callback=status_callback,
+                        target_os=target_os,
+                    )
+                    update_status("success", username, "File copied.")
+                    return HostResult(
+                        host=host,
+                        success=True,
+                        username=username,
+                        message="File copied successfully.",
+                        output=output
+                    )
+                elif protocol == "ssh":
+                    output = run_ssh(
+                        target_ip=host,
+                        username=username,
+                        password=password,
+                        domain=domain,
+                        script_path=script_path,
+                        command=command,
+                        script_args=script_args,
+                        verbose=verbose,
+                        status_callback=status_callback,
+                        target_os=target_os,
+                    )
                 
                 # Success!
                 update_status("success", username, "Command executed.")
@@ -233,7 +268,8 @@ def run_concurrent_execution(
     verbose: bool,
     max_workers: int = 10,
     source: Optional[str] = None,
-    dest: Optional[str] = None
+    dest: Optional[str] = None,
+    target_os: str = "windows"
 ) -> list[HostResult]:
     """Run execution concurrently across all hosts with live status display."""
     
@@ -279,7 +315,8 @@ def run_concurrent_execution(
                         host_statuses,
                         status_lock,
                         source,
-                        dest
+                        dest,
+                        target_os
                     ): host
                     for host in hosts
                 }
@@ -355,23 +392,26 @@ def write_output_files(results: list[HostResult], output_dir: str, console: Cons
 if __name__ == "__main__":
     # Parse arguments.
     parser = argparse.ArgumentParser(
-        usage="tomoe.py {smb, winrm} -i <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --source <file> --dest <path>] -v",
-        description="Tomoe is a python utility for cross-platform windows administration over multiple protocols in case of fail-over."
+        usage="tomoe.py {smb, winrm, ssh} -i <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --source <file> --dest <path>] -v",
+        description="Tomoe is a python utility for remote administration over multiple protocols in case of fail-over."
     )
-    parser.add_argument("protocol", choices=["smb", "winrm"], help="protocol to use for remote administration")
+    parser.add_argument("protocol", choices=["smb", "winrm", "ssh"], help="protocol to use for remote administration")
     parser.add_argument("-i", metavar="IP", required=True, help="target host IP/hostname or path to file with targets (one per line)")
     parser.add_argument("-d", "--domain", default="", help="domain of selected user")
     parser.add_argument("-u", "--username", required=True, help="username or path to file with usernames (one per line)")
     parser.add_argument("-p", "--password", required=True, help="password or path to file with passwords (one per line)")
 
+    parser.add_argument("--os", choices=["windows", "linux"], default="windows", dest="target_os",
+                        help="target host OS (default: windows). Only applies to SSH protocol.")
+
     # Script or Command; but never both.
     exec_group = parser.add_mutually_exclusive_group(required=False)
-    exec_group.add_argument("-s", "--script", help="local path to PowerShell script to execute")
-    exec_group.add_argument("-c", "--command", help="powershell command to execute")
+    exec_group.add_argument("-s", "--script", help="local path to script to execute (PowerShell on Windows, bash on Linux)")
+    exec_group.add_argument("-c", "--command", help="command to execute (PowerShell on Windows, shell on Linux)")
     
-    # File copy arguments (for smb/winrm protocol file transfer).
+    # File copy arguments (for smb/winrm/ssh protocol file transfer).
     parser.add_argument("--source", help="local path to file or directory to copy (use with --dest)")
-    parser.add_argument("--dest", help="remote destination as local Windows path, e.g. C:\\Windows\\Temp\\file.exe (use with --source)")
+    parser.add_argument("--dest", help="remote destination path, e.g. C:\\Windows\\Temp\\file.exe or /tmp/file (use with --source)")
     
     # Arguments to pass to the script.
     parser.add_argument("-a", "--args", default="", help="arguments to pass to the script")
@@ -380,6 +420,10 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
 
     args = parser.parse_args()
+    
+    # Validate --os is only used with ssh protocol.
+    if args.target_os == "linux" and args.protocol != "ssh":
+        parser.error("--os linux is only supported with the ssh protocol")
     
     # Validate arguments based on protocol and operation mode.
     if args.source or args.dest:
@@ -434,7 +478,8 @@ if __name__ == "__main__":
         verbose=args.verbose,
         max_workers=args.threads,
         source=args.source,
-        dest=args.dest
+        dest=args.dest,
+        target_os=args.target_os
     )
     
     # Print final results.
