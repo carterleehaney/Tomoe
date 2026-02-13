@@ -379,12 +379,20 @@ if __name__ == "__main__":
     
     # Arguments to pass to the script.
     parser.add_argument("-a", "--args", default="", help="arguments to pass to the script")
-    parser.add_argument("--shell", choices=["powershell", "cmd"], default="powershell", help="shell type for SMB protocol (default: powershell)")
+    parser.add_argument("--shell", choices=["powershell", "cmd"], default=argparse.SUPPRESS, help="shell type for SMB protocol (default: powershell)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
     parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
     parser.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
 
     args = parser.parse_args()
+    
+    # Validate protocol-specific arguments.
+    if args.protocol == "winrm" and hasattr(args, 'shell'):
+        parser.error("--shell argument is only valid for SMB protocol")
+    
+    # Set default shell type for SMB if not provided.
+    if not hasattr(args, 'shell'):
+        args.shell = "powershell"
     
     # Validate arguments based on protocol and operation mode.
     if args.source or args.dest:
