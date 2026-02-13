@@ -298,11 +298,11 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             if 'client' in locals():
                 try:
                     client.remove_service()
-                except:
+                except Exception:
                     pass
                 try:
                     client.disconnect()
-                except:
+                except Exception:
                     pass
             
             # Clean up uploaded script file
@@ -311,16 +311,16 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                     smb_conn.deleteFile(share, remote_path)
                     if verbose:
                         print(f"[*] Cleaned up script file: {share}\\{remote_path}")
-                except:
+                except Exception:
                     pass
             
             # Close SMB connection
             if smb_conn:
                 try:
                     smb_conn.close()
-                except:
+                except Exception:
                     pass
-        except:
+        except Exception:
             pass
 
 
