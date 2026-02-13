@@ -299,10 +299,12 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 try:
                     client.remove_service()
                 except:
+                    # Silently ignore cleanup errors - service may already be removed
                     pass
                 try:
                     client.disconnect()
                 except:
+                    # Silently ignore cleanup errors - connection may already be closed
                     pass
             
             # Clean up uploaded script file
@@ -312,6 +314,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                     if verbose:
                         print(f"[*] Cleaned up script file: {share}\\{remote_path}")
                 except:
+                    # Silently ignore cleanup errors - file may already be deleted or inaccessible
                     pass
             
             # Close SMB connection
@@ -319,8 +322,10 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 try:
                     smb_conn.close()
                 except:
+                    # Silently ignore cleanup errors - connection may already be closed
                     pass
         except:
+            # Silently ignore any errors in the entire cleanup block - best effort cleanup
             pass
 
 
