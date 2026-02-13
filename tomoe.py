@@ -86,7 +86,8 @@ def execute_on_host(
     host_statuses: dict[str, HostStatus],
     status_lock: Lock,
     source: Optional[str] = None,
-    dest: Optional[str] = None
+    dest: Optional[str] = None,
+    shell_type: str = "powershell"
 ) -> HostResult:
     """Execute command on a single host, trying credential permutations until success."""
     
@@ -146,6 +147,7 @@ def execute_on_host(
                         script_args=script_args,
                         verbose=verbose,
                         status_callback=status_callback,
+                        shell_type=shell_type,
                     )
                 elif protocol == "winrm" and source and dest:
                     output = run_winrm_copy(
@@ -233,7 +235,8 @@ def run_concurrent_execution(
     verbose: bool,
     max_workers: int = 10,
     source: Optional[str] = None,
-    dest: Optional[str] = None
+    dest: Optional[str] = None,
+    shell_type: str = "powershell"
 ) -> list[HostResult]:
     """Run execution concurrently across all hosts with live status display."""
     
@@ -279,7 +282,8 @@ def run_concurrent_execution(
                         host_statuses,
                         status_lock,
                         source,
-                        dest
+                        dest,
+                        shell_type
                     ): host
                     for host in hosts
                 }
@@ -375,6 +379,7 @@ if __name__ == "__main__":
     
     # Arguments to pass to the script.
     parser.add_argument("-a", "--args", default="", help="arguments to pass to the script")
+    parser.add_argument("--shell", choices=["powershell", "cmd"], default="powershell", help="shell type for SMB protocol (default: powershell)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
     parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
     parser.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
@@ -434,7 +439,8 @@ if __name__ == "__main__":
         verbose=args.verbose,
         max_workers=args.threads,
         source=args.source,
-        dest=args.dest
+        dest=args.dest,
+        shell_type=args.shell
     )
     
     # Print final results.
