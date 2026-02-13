@@ -1,5 +1,6 @@
 import os
 import socket
+import shlex
 from pypsexec.client import Client
 from impacket.smbconnection import SMBConnection
 import warnings
@@ -8,6 +9,25 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=".*crypto.*")
 warnings.filterwarnings("ignore", message=".*ARC4.*")
 
+
+def escape_powershell_arg(arg):
+    """
+    Escape a string for safe use as a PowerShell argument.
+    
+    Wraps the argument in single quotes and escapes any single quotes within
+    by doubling them. Single quotes in PowerShell prevent variable expansion
+    and command substitution, making this safe against injection attacks.
+    
+    Args:
+        arg: The string to escape.
+    
+    Returns:
+        The escaped string wrapped in single quotes.
+    """
+    if not arg:
+        return "''"
+    # Escape single quotes by doubling them, then wrap in single quotes
+    return "'" + arg.replace("'", "''") + "'"
 
 
 class SMBAuthenticationError(Exception):
@@ -176,7 +196,10 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 
                 executable = "cmd.exe"
                 if script_args:
-                    arguments = f'/c "{unc_path}" {script_args}'
+                    # Use shlex.quote to safely escape arguments for CMD
+                    # This prevents command injection through special characters
+                    escaped_args = shlex.quote(script_args)
+                    arguments = f'/c "{unc_path}" {escaped_args}'
                 else:
                     arguments = f'/c "{unc_path}"'
             else:
@@ -187,7 +210,10 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                     raise ValueError(f"PowerShell shell requires .ps1 files, got: {script_ext}")
                 
                 if script_args:
-                    ps_command = f"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& '{unc_path}' {script_args}; [System.Environment]::Exit($LASTEXITCODE)\""
+                    # Escape arguments to prevent PowerShell command injection
+                    # Single quotes in PowerShell prevent variable expansion and command substitution
+                    escaped_args = escape_powershell_arg(script_args)
+                    ps_command = f"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& '{unc_path}' {escaped_args}; [System.Environment]::Exit($LASTEXITCODE)\""
                 else:
                     ps_command = f"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& '{unc_path}'; [System.Environment]::Exit($LASTEXITCODE)\""
                 
