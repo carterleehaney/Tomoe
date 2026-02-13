@@ -544,10 +544,11 @@ def run_winrm_download(target_ip, username, password, domain="", source="", dest
             
             # Use PowerShell to enumerate all files and directories recursively
             # Returns tab-separated lines: RelativePath\tType (File or Directory)
+            ps_source = source_normalized.replace("'", "''")
             enum_script = (
-                f"Get-ChildItem -LiteralPath '{source_normalized}' -Recurse -Force | "
+                f"Get-ChildItem -LiteralPath '{ps_source}' -Recurse -Force | "
                 f"ForEach-Object {{ "
-                f"$rel = $_.FullName.Substring('{source_normalized}'.Length).TrimStart('\\'); "
+                f"$rel = $_.FullName.Substring('{ps_source}'.Length).TrimStart('\\'); "
                 f"$type = if ($_.PSIsContainer) {{ 'D' }} else {{ 'F' }}; "
                 f"\"$rel`t$type\" }}"
             )
