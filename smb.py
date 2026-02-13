@@ -18,6 +18,10 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module=".*crypto.
 warnings.filterwarnings("ignore", message=".*ARC4.*")
 
 
+# Constants for SMB operations
+DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file transfers
+DEFAULT_CONNECTION_TIMEOUT = 30  # seconds
+
 
 class SMBAuthenticationError(Exception):
     """Raised when SMB authentication fails due to invalid credentials."""
@@ -75,7 +79,7 @@ def _make_unc_path(server, share, path):
         return f"\\\\{server}\\{share}"
 
 
-def _copy_file_chunked(source_file, dest_file, chunk_size=1024*1024):
+def _copy_file_chunked(source_file, dest_file, chunk_size=DEFAULT_CHUNK_SIZE):
     """
     Copy data from source file to destination file in chunks.
     
@@ -192,7 +196,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 password=password,
                 port=445,
                 encrypt=encrypt,
-                connection_timeout=30
+                connection_timeout=DEFAULT_CONNECTION_TIMEOUT
             )
             
             # Try to upload to shares with fallback: ADMIN$ first, then C$\Windows\Temp
@@ -371,6 +375,13 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 except Exception:
                     pass
             
+            # Clean up SMB session
+            if 'script_path' in locals():
+                try:
+                    smbclient.delete_session(target_ip)
+                except Exception:
+                    pass
+            
             # Clean up uploaded script file
             if 'script_name' in locals() and 'share' in locals() and 'remote_path' in locals():
                 try:
@@ -435,7 +446,7 @@ def _smb_connect(target_ip, username, password, domain="", verbose=False, encryp
             password=password,
             port=445,
             encrypt=encrypt,
-            connection_timeout=30
+            connection_timeout=DEFAULT_CONNECTION_TIMEOUT
         )
 
         yield target_ip, username, domain
@@ -451,9 +462,11 @@ def _smb_connect(target_ip, username, password, domain="", verbose=False, encryp
             raise SMBAuthenticationError(f"Authentication failed: {e}")
         raise SMBConnectionError(f"Connection failed to {target_ip}: {e}")
     finally:
-        # smbclient doesn't require explicit cleanup for registered sessions
-        # Connections are automatically closed when they're no longer needed
-        pass
+        # Clean up the registered session to avoid leaving it in the global registry
+        try:
+            smbclient.delete_session(target_ip)
+        except Exception:
+            pass
 
 
 def run_smb_copy(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None):
@@ -657,11 +670,16 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
         # Determine if remote source is a file or directory
         remote_unc_path = _make_unc_path(server, share, remote_base_path)
         
-        try:
-            is_directory = smb_isdir(remote_unc_path)
-        except Exception:
-            # If we can't determine, assume it's a file
-            is_directory = False
+        # Check if path exists and determine if it's a directory
+        is_directory = False
+        if smb_exists(remote_unc_path):
+            try:
+                is_directory = smb_isdir(remote_unc_path)
+            except (OSError, IOError):
+                # If we can't determine type, assume it's a file
+                is_directory = False
+        else:
+            raise FileNotFoundError(f"Remote path does not exist: {remote_unc_path}")
         
         if not is_directory:
             # Single file download
