@@ -8,8 +8,8 @@ import string
 import socket
 from pypsexec.client import Client
 import smbclient
-from smbclient import open_file as smb_open, listdir as smb_listdir, walk as smb_walk
-from smbclient.path import exists as smb_exists, isfile as smb_isfile, isdir as smb_isdir
+from smbclient import open_file as smb_open, walk as smb_walk
+from smbclient.path import exists as smb_exists, isdir as smb_isdir
 import smbclient.shutil as smb_shutil
 import warnings
 
