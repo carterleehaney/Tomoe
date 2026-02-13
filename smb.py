@@ -8,8 +8,8 @@ import string
 import socket
 from pypsexec.client import Client
 import smbclient
-from smbclient import open_file as smb_open, walk as smb_walk
-from smbclient.path import exists as smb_exists, isdir as smb_isdir
+from smbclient import open_file as smb_open, listdir as smb_listdir, walk as smb_walk, remove as smb_remove
+from smbclient.path import exists as smb_exists, isfile as smb_isfile, isdir as smb_isdir
 import smbclient.shutil as smb_shutil
 import warnings
 
@@ -375,20 +375,20 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 except Exception:
                     pass
             
-            # Clean up SMB session
-            if 'script_path' in locals():
-                try:
-                    smbclient.delete_session(target_ip)
-                except Exception:
-                    pass
-            
-            # Clean up uploaded script file
+            # Clean up uploaded script file BEFORE deleting the session
             if 'script_name' in locals() and 'share' in locals() and 'remote_path' in locals():
                 try:
                     script_unc_path = _make_unc_path(target_ip, share, remote_path)
-                    smb_shutil.remove(script_unc_path)
+                    smb_remove(script_unc_path)
                     if verbose:
                         print(f"[*] Cleaned up script file: {share}\\{remote_path}")
+                except Exception:
+                    pass
+            
+            # Clean up SMB session after removing the file
+            if 'script_path' in locals():
+                try:
+                    smbclient.delete_session(target_ip)
                 except Exception:
                     pass
         except Exception:
