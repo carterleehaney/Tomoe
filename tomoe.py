@@ -87,7 +87,8 @@ def execute_on_host(
     status_lock: Lock,
     source: Optional[str] = None,
     dest: Optional[str] = None,
-    shell_type: str = "powershell"
+    shell_type: str = "powershell",
+    encrypt: bool = True
 ) -> HostResult:
     """Execute command on a single host, trying credential permutations until success."""
     
@@ -148,6 +149,7 @@ def execute_on_host(
                         verbose=verbose,
                         status_callback=status_callback,
                         shell_type=shell_type,
+                        encrypt=encrypt
                     )
                 elif protocol == "winrm" and source and dest:
                     output = run_winrm_copy(
@@ -236,7 +238,8 @@ def run_concurrent_execution(
     max_workers: int = 10,
     source: Optional[str] = None,
     dest: Optional[str] = None,
-    shell_type: str = "powershell"
+    shell_type: str = "powershell",
+    encrypt: bool = True
 ) -> list[HostResult]:
     """Run execution concurrently across all hosts with live status display."""
     
@@ -283,7 +286,8 @@ def run_concurrent_execution(
                         status_lock,
                         source,
                         dest,
-                        shell_type
+                        shell_type,
+                        encrypt
                     ): host
                     for host in hosts
                 }
@@ -379,7 +383,8 @@ if __name__ == "__main__":
     
     # Arguments to pass to the script.
     parser.add_argument("-a", "--args", default="", help="arguments to pass to the script")
-    parser.add_argument("--shell", choices=["powershell", "cmd"], default=argparse.SUPPRESS, help="shell type for SMB protocol (default: powershell)")
+    parser.add_argument("--shell", choices=["powershell", "cmd"], default="powershell", help="shell type for SMB protocol (default: powershell)")
+    parser.add_argument("--no-encrypt", dest="encrypt", action="store_false", default=True, help="disable SMB encryption (encryption is enabled by default)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
     parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
     parser.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
@@ -449,7 +454,8 @@ if __name__ == "__main__":
         max_workers=args.threads,
         source=args.source,
         dest=args.dest,
-        shell_type=args.shell
+        shell_type=args.shell,
+        encrypt=args.encrypt
     )
     
     # Print final results.
