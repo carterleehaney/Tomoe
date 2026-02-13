@@ -309,6 +309,10 @@ def run_concurrent_execution(
                 # to prevent files from overwriting each other.
                 use_host_subdirs = download and source and dest and len(hosts) > 1
                 
+                if use_host_subdirs:
+                    for host in hosts:
+                        os.makedirs(os.path.join(dest, host), exist_ok=True)
+                
                 # Submit all host tasks.
                 future_to_host = {
                     executor.submit(

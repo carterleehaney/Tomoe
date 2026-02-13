@@ -2,6 +2,7 @@ import sys
 import os
 import logging
 import time
+from contextlib import contextmanager
 from threading import Thread, Lock, Event
 import random
 import string
@@ -510,6 +511,86 @@ class RemoteStdInPipe(Pipes):
             time.sleep(1)
 
 
+@contextmanager
+def _smb_connect(target_ip, username, password, domain="", verbose=False):
+    """
+    Context manager that handles SMB connection lifecycle.
+    
+    Manages the shared boilerplate for SMB operations: domain extraction from
+    username, impacket logger configuration, connectivity pre-check, connection
+    creation, authentication, error classification, and guaranteed cleanup.
+    
+    Args:
+        target_ip: The IP address or hostname of the remote Windows machine.
+        username: The username for authentication (can be in DOMAIN\\username format).
+        password: The password for authentication.
+        domain: Optional domain name for domain-joined authentication.
+        verbose: If True, enable detailed impacket logging.
+    
+    Yields:
+        A tuple of (smb_connection, username, domain) where username and domain
+        may have been parsed from a DOMAIN\\username format.
+    
+    Raises:
+        SMBConnectionError: If port 445 is not reachable or the connection fails.
+        SMBAuthenticationError: If authentication fails due to invalid credentials.
+    """
+    # Extract domain from username if in DOMAIN\username format
+    if '\\' in username:
+        domain, username = username.split('\\', 1)
+
+    # Suppress impacket's verbose logging before any operations
+    impacket_logger = logging.getLogger('impacket')
+    impacket_logger.setLevel(logging.CRITICAL + 1)
+
+    if verbose:
+        impacket_logger.setLevel(logging.INFO)
+
+    # Perform a quick connectivity check before attempting SMB
+    if not check_port_open(target_ip, 445, timeout=5):
+        raise SMBConnectionError(f"Port 445 not reachable on {target_ip}")
+
+    smb_connection = SMBConnection(target_ip, target_ip, timeout=30)
+    try:
+        if verbose:
+            logging.info(f"Connecting to {target_ip}...")
+            logging.info(f"Authenticating as {domain}\\{username}...")
+
+        try:
+            smb_connection.login(username, password, domain)
+        except Exception as e:
+            error_msg = str(e).lower()
+            auth_error_patterns = [
+                "logon_failure", "access_denied", "status_logon_failure",
+                "bad password", "wrong password", "invalid credentials"
+            ]
+            if any(pattern in error_msg for pattern in auth_error_patterns):
+                raise SMBAuthenticationError(f"Authentication failed for {username}: {e}")
+            raise
+
+        yield smb_connection, username, domain
+
+    except SMBAuthenticationError:
+        raise
+    except SMBConnectionError:
+        raise
+    except Exception as e:
+        error_msg = str(e).lower()
+        auth_error_patterns = [
+            "logon_failure", "access_denied", "status_logon_failure",
+            "bad password", "wrong password", "invalid credentials",
+            "authentication", "unauthorized", "rejected"
+        ]
+        if any(pattern in error_msg for pattern in auth_error_patterns):
+            raise SMBAuthenticationError(f"Authentication failed: {e}")
+        raise
+    finally:
+        try:
+            smb_connection.close()
+        except Exception:
+            pass
+
+
 def run_smb_copy(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None):
     """
     Copy a local file or directory to a remote Windows host using SMB.
@@ -538,17 +619,12 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
         ValueError: If the destination path format is invalid.
     """
     
-    # Extract domain from username if in DOMAIN\username format
+    # Extract domain from username early so log messages are accurate
     if '\\' in username:
         domain, username = username.split('\\', 1)
     
-    # Suppress impacket's verbose logging before any operations
-    impacket_logger = logging.getLogger('impacket')
-    impacket_logger.setLevel(logging.CRITICAL + 1)
-    
     if verbose:
         logging.info(f"Preparing to copy to {target_ip} as {domain}\\{username}")
-        impacket_logger.setLevel(logging.INFO)
     
     # Validate source exists
     if not os.path.exists(source):
@@ -573,33 +649,7 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
     if verbose:
         logging.info(f"Share: {share}, Remote base path: {remote_base_path}")
     
-    # Perform a quick connectivity check before attempting SMB
-    if not check_port_open(target_ip, 445, timeout=5):
-        raise SMBConnectionError(f"Port 445 not reachable on {target_ip}")
-    
-    try:
-        # Establish SMB connection
-        if verbose:
-            logging.info(f"Connecting to {target_ip}...")
-        
-        smb_connection = SMBConnection(target_ip, target_ip, timeout=30)
-        
-        # Authenticate
-        if verbose:
-            logging.info(f"Authenticating as {domain}\\{username}...")
-        
-        try:
-            smb_connection.login(username, password, domain)
-        except Exception as e:
-            error_msg = str(e).lower()
-            auth_error_patterns = [
-                "logon_failure", "access_denied", "status_logon_failure",
-                "bad password", "wrong password", "invalid credentials"
-            ]
-            if any(pattern in error_msg for pattern in auth_error_patterns):
-                raise SMBAuthenticationError(f"Authentication failed for {username}: {e}")
-            raise
-        
+    with _smb_connect(target_ip, username, password, domain, verbose) as (smb_connection, username, domain):
         # Check if source is a file or directory
         if os.path.isfile(source):
             # Single file copy
@@ -616,8 +666,6 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
             
             if status_callback:
                 status_callback("Copying 1/1 files...")
-            
-            smb_connection.close()
             
             if verbose:
                 logging.info(f"File copied successfully: {file_size} bytes")
@@ -686,27 +734,10 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                     if status_callback:
                         status_callback(f"Copying {total_files}/{total_file_count} files...")
             
-            smb_connection.close()
-            
             if verbose:
                 logging.info(f"Directory copied successfully: {total_files} files, {total_bytes} bytes")
             
             return f"Copied {total_files} file(s) ({total_bytes} bytes) to \\\\{target_ip}\\{share}\\{remote_base_path}"
-    
-    except SMBAuthenticationError:
-        raise
-    except SMBConnectionError:
-        raise
-    except Exception as e:
-        error_msg = str(e).lower()
-        auth_error_patterns = [
-            "logon_failure", "access_denied", "status_logon_failure",
-            "bad password", "wrong password", "invalid credentials",
-            "authentication", "unauthorized", "rejected"
-        ]
-        if any(pattern in error_msg for pattern in auth_error_patterns):
-            raise SMBAuthenticationError(f"Authentication failed: {e}")
-        raise
 
 
 def run_smb_download(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None):
@@ -736,17 +767,12 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
         ValueError: If the source path format is invalid.
     """
     
-    # Extract domain from username if in DOMAIN\username format
+    # Extract domain from username early so log messages are accurate
     if '\\' in username:
         domain, username = username.split('\\', 1)
     
-    # Suppress impacket's verbose logging before any operations
-    impacket_logger = logging.getLogger('impacket')
-    impacket_logger.setLevel(logging.CRITICAL + 1)
-    
     if verbose:
         logging.info(f"Preparing to download from {target_ip} as {domain}\\{username}")
-        impacket_logger.setLevel(logging.INFO)
     
     # Parse source as a remote Windows path (e.g., "C:\Windows\Temp\file.exe")
     # Convert to SMB path using C$ share
@@ -763,33 +789,7 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
     if verbose:
         logging.info(f"Share: {share}, Remote base path: {remote_base_path}")
     
-    # Perform a quick connectivity check before attempting SMB
-    if not check_port_open(target_ip, 445, timeout=5):
-        raise SMBConnectionError(f"Port 445 not reachable on {target_ip}")
-    
-    try:
-        # Establish SMB connection
-        if verbose:
-            logging.info(f"Connecting to {target_ip}...")
-        
-        smb_connection = SMBConnection(target_ip, target_ip, timeout=30)
-        
-        # Authenticate
-        if verbose:
-            logging.info(f"Authenticating as {domain}\\{username}...")
-        
-        try:
-            smb_connection.login(username, password, domain)
-        except Exception as e:
-            error_msg = str(e).lower()
-            auth_error_patterns = [
-                "logon_failure", "access_denied", "status_logon_failure",
-                "bad password", "wrong password", "invalid credentials"
-            ]
-            if any(pattern in error_msg for pattern in auth_error_patterns):
-                raise SMBAuthenticationError(f"Authentication failed for {username}: {e}")
-            raise
-        
+    with _smb_connect(target_ip, username, password, domain, verbose) as (smb_connection, username, domain):
         # Determine if remote source is a file or directory by attempting to list it
         is_directory = False
         try:
@@ -804,6 +804,10 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
             # Single file download
             if status_callback:
                 status_callback("Downloading 1 file...")
+            
+            # If dest is an existing directory, append the source filename
+            if os.path.isdir(dest):
+                dest = os.path.join(dest, os.path.basename(remote_base_path))
             
             # Ensure local destination directory exists
             dest_dir = os.path.dirname(dest)
@@ -820,8 +824,6 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
             
             if status_callback:
                 status_callback("Downloading 1/1 files...")
-            
-            smb_connection.close()
             
             if verbose:
                 logging.info(f"File downloaded successfully: {file_size} bytes")
@@ -879,24 +881,7 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
             
             download_directory(remote_base_path, dest)
             
-            smb_connection.close()
-            
             if verbose:
                 logging.info(f"Directory downloaded successfully: {total_files} files, {total_bytes} bytes")
             
             return f"Downloaded {total_files} file(s) ({total_bytes} bytes) from \\\\{target_ip}\\{share}\\{remote_base_path}"
-    
-    except SMBAuthenticationError:
-        raise
-    except SMBConnectionError:
-        raise
-    except Exception as e:
-        error_msg = str(e).lower()
-        auth_error_patterns = [
-            "logon_failure", "access_denied", "status_logon_failure",
-            "bad password", "wrong password", "invalid credentials",
-            "authentication", "unauthorized", "rejected"
-        ]
-        if any(pattern in error_msg for pattern in auth_error_patterns):
-            raise SMBAuthenticationError(f"Authentication failed: {e}")
-        raise

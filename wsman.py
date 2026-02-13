@@ -359,7 +359,8 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
                     read_timeout=30,
                 ) as client:
                     for remote_dir in dirs_to_create:
-                        mkdir_script = f"New-Item -ItemType Directory -Path '{remote_dir}' -Force | Out-Null"
+                        remote_dir_escaped = remote_dir.replace("'", "''")
+                        mkdir_script = f"New-Item -ItemType Directory -Path '{remote_dir_escaped}' -Force | Out-Null"
                         try:
                             client.execute_ps(mkdir_script)
                             if verbose:
@@ -494,7 +495,9 @@ def run_winrm_download(target_ip, username, password, domain="", source="", dest
             read_timeout=30,
         ) as client:
             # Check if the remote path is a directory
-            check_script = f"if (Test-Path -LiteralPath '{source_normalized}' -PathType Container) {{ 'DIRECTORY' }} elseif (Test-Path -LiteralPath '{source_normalized}' -PathType Leaf) {{ 'FILE' }} else {{ 'NOTFOUND' }}"
+            # Escape single quotes for safe embedding in PowerShell single-quoted strings
+            source_escaped = source_normalized.replace("'", "''")
+            check_script = f"if (Test-Path -LiteralPath '{source_escaped}' -PathType Container) {{ 'DIRECTORY' }} elseif (Test-Path -LiteralPath '{source_escaped}' -PathType Leaf) {{ 'FILE' }} else {{ 'NOTFOUND' }}"
             output, streams, had_errors = client.execute_ps(check_script)
             path_type = output.strip()
         
@@ -505,6 +508,10 @@ def run_winrm_download(target_ip, username, password, domain="", source="", dest
             # Single file download
             if status_callback:
                 status_callback("Downloading 1 file...")
+            
+            # If dest is an existing directory, append the source filename
+            if os.path.isdir(dest):
+                dest = os.path.join(dest, os.path.basename(source_normalized))
             
             # Ensure local destination directory exists
             dest_dir = os.path.dirname(dest)
@@ -544,10 +551,12 @@ def run_winrm_download(target_ip, username, password, domain="", source="", dest
             
             # Use PowerShell to enumerate all files and directories recursively
             # Returns tab-separated lines: RelativePath\tType (File or Directory)
+            # Escape single quotes for safe embedding in PowerShell single-quoted strings
+            source_escaped = source_normalized.replace("'", "''")
             enum_script = (
-                f"Get-ChildItem -LiteralPath '{source_normalized}' -Recurse -Force | "
+                f"Get-ChildItem -LiteralPath '{source_escaped}' -Recurse -Force | "
                 f"ForEach-Object {{ "
-                f"$rel = $_.FullName.Substring('{source_normalized}'.Length).TrimStart('\\'); "
+                f"$rel = $_.FullName.Substring('{source_escaped}'.Length).TrimStart('\\'); "
                 f"$type = if ($_.PSIsContainer) {{ 'D' }} else {{ 'F' }}; "
                 f"\"$rel`t$type\" }}"
             )
@@ -565,22 +574,36 @@ def run_winrm_download(target_ip, username, password, domain="", source="", dest
             ) as client:
                 output, streams, had_errors = client.execute_ps(enum_script)
             
+            # Check for PowerShell errors during enumeration
+            if had_errors:
+                error_messages = []
+                if streams and streams.error:
+                    error_messages = [str(err) for err in streams.error]
+                error_detail = "; ".join(error_messages) if error_messages else "Unknown error"
+                raise RuntimeError(f"Failed to enumerate remote directory '{source_normalized}': {error_detail}")
+            
             # Parse enumeration results
             dirs_to_create = []
             files_to_download = []
             
-            for line in output.strip().split('\n'):
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split('\t')
-                if len(parts) != 2:
-                    continue
-                rel_path, entry_type = parts[0].strip(), parts[1].strip()
-                if entry_type == 'D':
-                    dirs_to_create.append(rel_path)
-                elif entry_type == 'F':
-                    files_to_download.append(rel_path)
+            if output and output.strip():
+                for line in output.strip().split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split('\t')
+                    if len(parts) != 2:
+                        continue
+                    rel_path, entry_type = parts[0].strip(), parts[1].strip()
+                    if entry_type == 'D':
+                        dirs_to_create.append(rel_path)
+                    elif entry_type == 'F':
+                        files_to_download.append(rel_path)
+            
+            if not dirs_to_create and not files_to_download:
+                if verbose:
+                    print(f"[*] Remote directory is empty: {source_normalized}")
+                return f"Remote directory is empty: {target_ip}:{source_normalized}"
             
             # Create local directory structure
             os.makedirs(dest, exist_ok=True)
