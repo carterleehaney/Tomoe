@@ -180,8 +180,8 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 else:
                     arguments = f'/c "{unc_path}"'
             else:
-                # For PowerShell (default) - run directly, not through cmd.exe
-                # Use cmd.exe wrapper and explicit exit to ensure PowerShell terminates cleanly.
+                # For PowerShell (default) - invoke the script via PowerShell, wrapped by cmd.exe
+                # to ensure the process terminates cleanly using an explicit exit code.
                 script_ext = os.path.splitext(script_name)[1].lower()
                 if script_ext != '.ps1':
                     raise ValueError(f"PowerShell shell requires .ps1 files, got: {script_ext}")
