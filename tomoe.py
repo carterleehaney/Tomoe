@@ -387,11 +387,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Validate protocol-specific arguments.
-    if args.protocol == "winrm" and hasattr(args, 'shell'):
+    shell_provided = hasattr(args, 'shell')
+    if args.protocol == "winrm" and shell_provided:
         parser.error("--shell argument is only valid for SMB protocol")
     
     # Set default shell type for SMB if not provided.
-    if not hasattr(args, 'shell'):
+    if not shell_provided:
         args.shell = "powershell"
     
     # Validate arguments based on protocol and operation mode.
