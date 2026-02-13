@@ -599,6 +599,9 @@ def run_winrm_download(target_ip, username, password, domain="", source="", dest
             if status_callback:
                 status_callback(f"Downloading 0/{total_file_count} files...")
             
+            # Normalize source path to avoid duplicate backslashes when joining
+            source_normalized = source_normalized.rstrip('\\')
+            
             for rel_file in files_to_download:
                 remote_file_path = source_normalized + '\\' + rel_file
                 local_file_path = os.path.join(dest, rel_file)
