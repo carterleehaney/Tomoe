@@ -580,12 +580,17 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                     remote_dir_unc = _make_unc_path(server, share, remote_dir)
                     try:
                         # makedirs creates all parent directories if they don't exist
-                        smb_shutil.makedirs(remote_dir_unc, exist_ok=True)
+                        smbclient.makedirs(remote_dir_unc, exist_ok=True)
                         if verbose:
                             print(f"[*] Created directory: \\\\{server}\\{share}\\{remote_dir}")
-                    except Exception:
-                        # Directory may already exist, ignore
-                        pass
+                    except smbclient.SMBException as e:
+                        # Ignore only "already exists" errors; re-raise others
+                        msg = str(e).lower()
+                        if "already exists" in msg or "status_object_name_collision" in msg:
+                            if verbose:
+                                print(f"[*] Directory already exists: \\\\{server}\\{share}\\{remote_dir}")
+                        else:
+                            raise
                 
                 # Copy each file
                 for filename in files:
