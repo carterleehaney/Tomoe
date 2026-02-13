@@ -75,6 +75,25 @@ def _make_unc_path(server, share, path):
         return f"\\\\{server}\\{share}"
 
 
+def _copy_file_chunked(source_file, dest_file, chunk_size=1024*1024):
+    """
+    Copy data from source file to destination file in chunks.
+    
+    Args:
+        source_file: Source file object (opened for reading)
+        dest_file: Destination file object (opened for writing)
+        chunk_size: Size of chunks to read/write (default: 1MB)
+    
+    This function is memory-efficient for large files as it reads and writes
+    in chunks rather than loading the entire file into memory.
+    """
+    while True:
+        chunk = source_file.read(chunk_size)
+        if not chunk:
+            break
+        dest_file.write(chunk)
+
+
 def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None, shell_type="powershell", encrypt=True):
     """
     Execute a script or command on a remote Windows host using SMB/psexec.
@@ -185,7 +204,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 admin_unc_path = _make_unc_path(target_ip, 'ADMIN$', script_name)
                 with open(script_path, 'rb') as local_file:
                     with smb_open(admin_unc_path, mode='wb') as remote_file:
-                        remote_file.write(local_file.read())
+                        _copy_file_chunked(local_file, remote_file)
                 share = 'ADMIN$'
                 remote_path = script_name
                 if verbose:
@@ -200,7 +219,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                     temp_unc_path = _make_unc_path(target_ip, 'C$', temp_path)
                     with open(script_path, 'rb') as local_file:
                         with smb_open(temp_unc_path, mode='wb') as remote_file:
-                            remote_file.write(local_file.read())
+                            _copy_file_chunked(local_file, remote_file)
                     share = 'C$'
                     remote_path = temp_path
                     if verbose:
@@ -366,7 +385,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
 
 
 @contextmanager
-def _smb_connect(target_ip, username, password, domain="", verbose=False):
+def _smb_connect(target_ip, username, password, domain="", verbose=False, encrypt=None):
     """
     Context manager that handles SMB session registration for smbclient.
     
@@ -380,6 +399,7 @@ def _smb_connect(target_ip, username, password, domain="", verbose=False):
         password: The password for authentication.
         domain: Optional domain name for domain-joined authentication.
         verbose: If True, enable detailed logging.
+        encrypt: Optional SMB encryption setting (True, False, or None to let server decide).
     
     Yields:
         A tuple of (target_ip, username, domain) for use in subsequent SMB operations.
@@ -414,7 +434,7 @@ def _smb_connect(target_ip, username, password, domain="", verbose=False):
             username=full_username,
             password=password,
             port=445,
-            encrypt=None,  # Let the server decide
+            encrypt=encrypt,
             connection_timeout=30
         )
 
@@ -509,7 +529,7 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
             remote_unc_path = _make_unc_path(server, share, remote_path)
             with open(source, 'rb') as local_file:
                 with smb_open(remote_unc_path, mode='wb') as remote_file:
-                    remote_file.write(local_file.read())
+                    _copy_file_chunked(local_file, remote_file)
             
             if status_callback:
                 status_callback("Copying 1/1 files...")
@@ -570,7 +590,7 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                     remote_file_unc = _make_unc_path(server, share, remote_file_path)
                     with open(local_file_path, 'rb') as local_file:
                         with smb_open(remote_file_unc, mode='wb') as remote_file:
-                            remote_file.write(local_file.read())
+                            _copy_file_chunked(local_file, remote_file)
                     
                     total_files += 1
                     total_bytes += file_size
@@ -662,7 +682,7 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
             
             with smb_open(remote_unc_path, mode='rb') as remote_file:
                 with open(dest, 'wb') as local_file:
-                    local_file.write(remote_file.read())
+                    _copy_file_chunked(remote_file, local_file)
             
             file_size = os.path.getsize(dest)
             
@@ -715,7 +735,7 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
                     
                     with smb_open(remote_file_path, mode='rb') as remote_file:
                         with open(local_file_path, 'wb') as local_file:
-                            local_file.write(remote_file.read())
+                            _copy_file_chunked(remote_file, local_file)
                     
                     file_size = os.path.getsize(local_file_path)
                     total_files += 1
