@@ -46,7 +46,7 @@ def check_port_open(host, port=445, timeout=5):
         return False
 
 
-def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None, shell_type="powershell"):
+def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None, shell_type="powershell", encrypt=True):
     """
     Execute a script or command on a remote Windows host using SMB/psexec.
     
@@ -61,6 +61,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         verbose: If True, print detailed status messages.
         status_callback: Optional callable(message) to report progress.
         shell_type: "powershell" (default) or "cmd" to specify the shell type.
+        encrypt: Boolean, whether to use SMB encryption (default: True).
     
     Returns:
         String containing the combined output (stdout + stderr).
@@ -104,7 +105,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             target_ip,
             username=auth_username,
             password=password,
-            encrypt=False
+            encrypt=encrypt
         )
         
         # Connect to the remote host
