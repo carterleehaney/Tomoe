@@ -13,64 +13,51 @@ def escape_powershell_arg(arg):
     """
     Escape a string for safe use as PowerShell arguments.
     
-    This function takes a string that may contain multiple arguments and escapes
-    dangerous characters to prevent command injection while preserving argument
-    splitting behavior. Special characters like single quotes, backticks, and
-    dollar signs are escaped using PowerShell's backtick escape character.
+    Wraps the argument string in single quotes and escapes any embedded single
+    quotes by doubling them. In PowerShell, single-quoted strings are treated
+    literally with no variable expansion or command substitution, making this
+    approach safe against injection attacks. The entire arg string is treated
+    as a single parameter to the script.
     
     Args:
-        arg: The argument string to escape (may contain multiple space-separated args).
+        arg: The argument string to escape.
     
     Returns:
-        The escaped argument string.
+        The safely quoted argument string suitable for PowerShell -Command.
     """
     if not arg:
         return ""
-    # In PowerShell, the backtick ` is the escape character
-    # Escape backtick first, then other special characters that could cause injection
-    # Special chars: ` (backtick), $ (variable), ' (quote), " (quote), ; (statement separator)
-    # Also: & | < > ( ) { } [ ]
-    escaped = arg
-    escaped = escaped.replace('`', '``')  # Escape backtick first
-    escaped = escaped.replace('$', '`$')  # Prevent variable expansion
-    escaped = escaped.replace("'", "`'")  # Escape single quotes
-    escaped = escaped.replace('"', '`"')  # Escape double quotes
-    escaped = escaped.replace(';', '`;')  # Prevent statement separation
-    escaped = escaped.replace('&', '`&')  # Prevent command chaining
-    escaped = escaped.replace('|', '`|')  # Prevent piping
-    return escaped
+    # In PowerShell single-quoted strings, single quotes are escaped by doubling them
+    # Everything else is treated literally (no variable expansion, no command substitution)
+    # We wrap the entire args string in single quotes for safety
+    escaped = arg.replace("'", "''")
+    return f"'{escaped}'"
 
 
 def escape_cmd_arg(arg):
     """
     Escape a string for safe use as CMD.exe arguments.
     
-    Escapes all special CMD characters using the caret (^) character, which is
-    CMD's escape character. This prevents command injection through special
-    characters like &, |, <, >, etc., while preserving argument splitting.
+    Wraps the argument string in double quotes and escapes any embedded double
+    quotes and other special characters using CMD-specific rules. The entire arg
+    string is treated as a single parameter to the batch file.
     
     Args:
-        arg: The argument string to escape (may contain multiple space-separated args).
+        arg: The argument string to escape.
     
     Returns:
-        The escaped argument string.
+        The safely quoted argument string suitable for CMD.exe.
     """
     if not arg:
         return ""
-    # In CMD, the caret ^ is the escape character
-    # Escape these special characters: ^ & | < > ( ) % !
-    escaped = arg
-    escaped = escaped.replace('^', '^^')  # Escape caret first
-    escaped = escaped.replace('&', '^&')  # Prevent command chaining
-    escaped = escaped.replace('|', '^|')  # Prevent piping
-    escaped = escaped.replace('<', '^<')  # Prevent redirection
-    escaped = escaped.replace('>', '^>')  # Prevent redirection
-    escaped = escaped.replace('(', '^(')  # Prevent grouping
-    escaped = escaped.replace(')', '^)')  # Prevent grouping
-    escaped = escaped.replace('%', '^%')  # Prevent variable expansion
-    escaped = escaped.replace('!', '^!')  # Prevent delayed expansion
-    escaped = escaped.replace('"', '^"')  # Escape quotes
-    return escaped
+    # For CMD.exe, we wrap the args in double quotes
+    # Inside double quotes, we need to escape:
+    # - Double quotes themselves with \"
+    # - Percent signs by doubling them
+    # Special characters like &, |, <, > lose their special meaning inside quotes
+    # except for % which still expands variables
+    escaped = arg.replace('"', '\\"').replace('%', '%%')
+    return f'"{escaped}"'
 
 
 class SMBAuthenticationError(Exception):
@@ -239,8 +226,8 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 
                 executable = "cmd.exe"
                 if script_args:
-                    # Escape arguments to prevent CMD command injection
-                    # Uses caret (^) to escape all special characters
+                    # Wrap arguments in quotes to prevent CMD command injection
+                    # The entire args string is treated as a single parameter
                     escaped_args = escape_cmd_arg(script_args)
                     arguments = f'/c "{unc_path}" {escaped_args}'
                 else:
@@ -253,8 +240,9 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                     raise ValueError(f"PowerShell shell requires .ps1 files, got: {script_ext}")
                 
                 if script_args:
-                    # Escape arguments to prevent PowerShell command injection
-                    # Uses backtick (`) to escape special characters while preserving arg splitting
+                    # Wrap arguments in single quotes to prevent PowerShell injection
+                    # Single quotes prevent variable expansion and command substitution
+                    # The entire args string is treated as a single parameter
                     escaped_args = escape_powershell_arg(script_args)
                     ps_command = f"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& '{unc_path}' {escaped_args}; [System.Environment]::Exit($LASTEXITCODE)\""
                 else:
