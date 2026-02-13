@@ -1,6 +1,5 @@
 import os
 import socket
-import shlex
 from pypsexec.client import Client
 from impacket.smbconnection import SMBConnection
 import warnings
@@ -28,6 +27,28 @@ def escape_powershell_arg(arg):
         return "''"
     # Escape single quotes by doubling them, then wrap in single quotes
     return "'" + arg.replace("'", "''") + "'"
+
+
+def escape_cmd_arg(arg):
+    """
+    Escape a string for safe use as a CMD.exe argument.
+    
+    Wraps the argument in double quotes and escapes special characters using
+    the caret (^) character, which is CMD's escape character. This prevents
+    command injection through special characters like &, |, <, >, etc.
+    
+    Args:
+        arg: The string to escape.
+    
+    Returns:
+        The escaped string wrapped in double quotes.
+    """
+    if not arg:
+        return ''
+    # Escape caret first (since it's the escape character), then quotes
+    # Wrap the result in double quotes to prevent interpretation of special chars
+    escaped = arg.replace('^', '^^').replace('"', '^"')
+    return f'"{escaped}"'
 
 
 class SMBAuthenticationError(Exception):
@@ -196,9 +217,9 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 
                 executable = "cmd.exe"
                 if script_args:
-                    # Use shlex.quote to safely escape arguments for CMD
-                    # This prevents command injection through special characters
-                    escaped_args = shlex.quote(script_args)
+                    # Escape arguments to prevent CMD command injection
+                    # Uses caret (^) to escape special characters and wraps in quotes
+                    escaped_args = escape_cmd_arg(script_args)
                     arguments = f'/c "{unc_path}" {escaped_args}'
                 else:
                     arguments = f'/c "{unc_path}"'
