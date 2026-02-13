@@ -52,6 +52,23 @@ def check_port_open(host, port=445, timeout=5):
         return False
 
 
+def _putfile_callback(data):
+    """
+    Return a callback for SMBConnection.putFile.
+    putFile expects a callable that is invoked as callback(size) and returns up to size bytes.
+    This wraps raw bytes so they are served in chunks.
+    """
+    offset = [0]
+
+    def read(size):
+        start = offset[0]
+        end = min(start + size, len(data))
+        offset[0] = end
+        return data[start:end]
+
+    return read
+
+
 def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None, shell_type="powershell", encrypt=True):
     """
     Execute a script or command on a remote Windows host using SMB/psexec.
@@ -145,9 +162,13 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             share = None
             remote_path = None
             
+            # Read script content once; putFile expects a callback(size) -> bytes, not raw bytes or .read
+            with open(script_path, 'rb') as f:
+                script_data = f.read()
+            script_cb = _putfile_callback(script_data)
             # Try ADMIN$ first (requires admin privileges)
             try:
-                smb_conn.putFile('ADMIN$', script_name, open(script_path, 'rb').read)
+                smb_conn.putFile('ADMIN$', script_name, script_cb)
                 share = 'ADMIN$'
                 remote_path = script_name
                 if verbose:
@@ -159,7 +180,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 # Fallback to C$\Windows\Temp
                 try:
                     temp_path = f"Windows\\Temp\\{script_name}"
-                    smb_conn.putFile('C$', temp_path, open(script_path, 'rb').read)
+                    smb_conn.putFile('C$', temp_path, script_cb)
                     share = 'C$'
                     remote_path = temp_path
                     if verbose:
@@ -481,7 +502,7 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                 print(f"[*] Uploading {source} ({file_size} bytes) to \\\\{target_ip}\\{share}\\{remote_path}...")
             
             with open(source, 'rb') as local_file:
-                smb_connection.putFile(share, remote_path, local_file.read)
+                smb_connection.putFile(share, remote_path, _putfile_callback(local_file.read()))
             
             if status_callback:
                 status_callback("Copying 1/1 files...")
@@ -545,7 +566,7 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                         print(f"[*] Uploading {local_file_path} ({file_size} bytes) to \\\\{target_ip}\\{share}\\{remote_file_path}...")
                     
                     with open(local_file_path, 'rb') as f:
-                        smb_connection.putFile(share, remote_file_path, f.read)
+                        smb_connection.putFile(share, remote_file_path, _putfile_callback(f.read()))
                     
                     total_files += 1
                     total_bytes += file_size
