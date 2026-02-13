@@ -10,6 +10,7 @@ from pypsexec.client import Client
 import smbclient
 from smbclient import open_file as smb_open, listdir as smb_listdir, walk as smb_walk
 from smbclient.path import exists as smb_exists, isfile as smb_isfile, isdir as smb_isdir
+import smbclient.shutil as smb_shutil
 import warnings
 
 # Suppress cryptography deprecation warnings from dependencies
@@ -355,7 +356,6 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             if 'script_name' in locals() and 'share' in locals() and 'remote_path' in locals():
                 try:
                     script_unc_path = _make_unc_path(target_ip, share, remote_path)
-                    import smbclient.shutil as smb_shutil
                     smb_shutil.remove(script_unc_path)
                     if verbose:
                         print(f"[*] Cleaned up script file: {share}\\{remote_path}")
@@ -546,7 +546,6 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                 if remote_dir:
                     remote_dir_unc = _make_unc_path(server, share, remote_dir)
                     try:
-                        import smbclient.shutil as smb_shutil
                         # makedirs creates all parent directories if they don't exist
                         smb_shutil.makedirs(remote_dir_unc, exist_ok=True)
                         if verbose:
@@ -703,9 +702,11 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
                 
                 # Download each file
                 for filename in files:
-                    remote_file_path = remote_root + '\\' + filename if remote_root.endswith('\\') else remote_root + '\\\\' + filename
-                    # Normalize path
-                    remote_file_path = remote_file_path.replace('\\\\\\', '\\\\')
+                    # Construct remote file path using UNC path separator
+                    if not remote_root.endswith('\\'):
+                        remote_file_path = remote_root + '\\' + filename
+                    else:
+                        remote_file_path = remote_root + filename
                     
                     local_file_path = os.path.join(local_dir, filename)
                     
