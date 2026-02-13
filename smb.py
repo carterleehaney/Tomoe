@@ -38,9 +38,10 @@ def escape_cmd_arg(arg):
     """
     Escape a string for safe use as CMD.exe arguments.
     
-    Wraps the argument string in double quotes and escapes any embedded double
-    quotes and other special characters using CMD-specific rules. The entire arg
-    string is treated as a single parameter to the batch file.
+    Wraps the argument string in double quotes and escapes special characters
+    that retain meaning even inside quotes. Uses the caret (^) character to
+    escape quotes and doubles percent signs to prevent variable expansion.
+    The entire arg string is treated as a single parameter to the batch file.
     
     Args:
         arg: The argument string to escape.
@@ -51,12 +52,15 @@ def escape_cmd_arg(arg):
     if not arg:
         return ""
     # For CMD.exe, we wrap the args in double quotes
-    # Inside double quotes, we need to escape:
-    # - Double quotes themselves with \"
-    # - Percent signs by doubling them
-    # Special characters like &, |, <, > lose their special meaning inside quotes
-    # except for % which still expands variables
-    escaped = arg.replace('"', '\\"').replace('%', '%%')
+    # Even inside double quotes, some characters need escaping:
+    # - Caret (^) is the escape character, must be doubled
+    # - Double quotes need to be escaped with ^"
+    # - Percent signs need to be doubled to prevent variable expansion
+    # Special characters like &, |, <, > lose their meaning inside quotes
+    escaped = arg
+    escaped = escaped.replace('^', '^^')  # Escape caret first
+    escaped = escaped.replace('"', '^"')  # Escape quotes
+    escaped = escaped.replace('%', '%%')  # Prevent variable expansion
     return f'"{escaped}"'
 
 
