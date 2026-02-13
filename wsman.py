@@ -266,7 +266,7 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
             if os.path.isfile(source):
                 # Single file copy - mimic SMB behavior
                 if status_callback:
-                    status_callback("Copying 0/1 files...")
+                    status_callback("Copying 1 file...")
                 file_size = os.path.getsize(source)
                 
                 # Normalize destination path and parse like SMB does
@@ -507,7 +507,7 @@ def run_winrm_download(target_ip, username, password, domain="", source="", dest
         if path_type == 'FILE':
             # Single file download
             if status_callback:
-                status_callback("Downloading 1 file...")
+                status_callback("Downloading 0/1 files...")
             
             # If dest is an existing directory, append the source filename
             if os.path.isdir(dest):
@@ -620,6 +620,9 @@ def run_winrm_download(target_ip, username, password, domain="", source="", dest
             
             if status_callback:
                 status_callback(f"Downloading 0/{total_file_count} files...")
+            
+            # Normalize source path to avoid duplicate backslashes when joining
+            source_normalized = source_normalized.rstrip('\\')
             
             for rel_file in files_to_download:
                 remote_file_path = source_normalized + '\\' + rel_file

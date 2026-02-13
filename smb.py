@@ -793,7 +793,19 @@ def run_smb_download(target_ip, username, password, domain="", source="", dest="
         # Determine if remote source is a file or directory by attempting to list it
         is_directory = False
         try:
-            entries = smb_connection.listPath(share, remote_base_path + '\\*')
+            # Handle root directory (empty or only separators) explicitly to avoid passing an invalid pattern like '\\*'
+            if remote_base_path:
+                normalized_remote_base_path = remote_base_path.rstrip('\\/')
+            else:
+                normalized_remote_base_path = ''
+
+            if normalized_remote_base_path:
+                list_pattern = normalized_remote_base_path + '\\*'
+            else:
+                # Empty path after normalization => list the root of the share
+                list_pattern = '*'
+
+            entries = smb_connection.listPath(share, list_pattern)
             # If listPath succeeds, it's a directory
             is_directory = True
         except Exception:
