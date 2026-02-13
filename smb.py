@@ -294,34 +294,31 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         raise
     finally:
         # Ensure cleanup happens even if an error occurs
-        try:
-            if 'client' in locals():
-                try:
-                    client.remove_service()
-                except Exception:
-                    pass
-                try:
-                    client.disconnect()
-                except Exception:
-                    pass
-            
-            # Clean up uploaded script file
-            if script_name and smb_conn and 'share' in locals() and 'remote_path' in locals():
-                try:
-                    smb_conn.deleteFile(share, remote_path)
-                    if verbose:
-                        print(f"[*] Cleaned up script file: {share}\\{remote_path}")
-                except Exception:
-                    pass
-            
-            # Close SMB connection
-            if smb_conn:
-                try:
-                    smb_conn.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        if 'client' in locals():
+            try:
+                client.remove_service()
+            except Exception:
+                pass
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+        
+        # Clean up uploaded script file
+        if script_name and smb_conn and 'share' in locals() and 'remote_path' in locals():
+            try:
+                smb_conn.deleteFile(share, remote_path)
+                if verbose:
+                    print(f"[*] Cleaned up script file: {share}\\{remote_path}")
+            except Exception:
+                pass
+        
+        # Close SMB connection
+        if smb_conn:
+            try:
+                smb_conn.close()
+            except Exception:
+                pass
 
 
 def run_smb_copy(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None):
