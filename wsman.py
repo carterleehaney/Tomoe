@@ -504,7 +504,7 @@ def run_winrm_download(target_ip, username, password, domain="", source="", dest
         if path_type == 'FILE':
             # Single file download
             if status_callback:
-                status_callback("Downloading 1 file...")
+                status_callback("Downloading 0/1 files...")
             
             # Ensure local destination directory exists
             dest_dir = os.path.dirname(dest)
