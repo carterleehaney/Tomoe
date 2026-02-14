@@ -1,13 +1,26 @@
 import os
+import logging
+import time
+from contextlib import contextmanager
+from threading import Thread, Lock, Event
+import random
+import string
 import socket
 from pypsexec.client import Client
-from impacket.smbconnection import SMBConnection
+import smbclient
+from smbclient import open_file as smb_open, listdir as smb_listdir, walk as smb_walk, remove as smb_remove
+from smbclient.path import exists as smb_exists, isfile as smb_isfile, isdir as smb_isdir
+import smbclient.shutil as smb_shutil
 import warnings
 
 # Suppress cryptography deprecation warnings from dependencies
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=".*crypto.*")
 warnings.filterwarnings("ignore", message=".*ARC4.*")
 
+
+# Constants for SMB operations
+DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file transfers
+DEFAULT_CONNECTION_TIMEOUT = 30  # seconds
 
 
 class SMBAuthenticationError(Exception):
@@ -44,6 +57,45 @@ def check_port_open(host, port=445, timeout=5):
         return result == 0
     except socket.error:
         return False
+
+
+def _make_unc_path(server, share, path):
+    """
+    Create a UNC path for smbclient operations.
+    
+    Args:
+        server: The server hostname or IP
+        share: The share name (e.g., 'C$', 'ADMIN$')
+        path: The path within the share (can be empty string for root)
+    
+    Returns:
+        A UNC path like \\\\server\\share\\path
+    """
+    if path:
+        # Normalize path separators
+        path = path.replace('/', '\\')
+        return f"\\\\{server}\\{share}\\{path}"
+    else:
+        return f"\\\\{server}\\{share}"
+
+
+def _copy_file_chunked(source_file, dest_file, chunk_size=DEFAULT_CHUNK_SIZE):
+    """
+    Copy data from source file to destination file in chunks.
+    
+    Args:
+        source_file: Source file object (opened for reading)
+        dest_file: Destination file object (opened for writing)
+        chunk_size: Size of chunks to read/write (default: 1MB)
+    
+    This function is memory-efficient for large files as it reads and writes
+    in chunks rather than loading the entire file into memory.
+    """
+    while True:
+        chunk = source_file.read(chunk_size)
+        if not chunk:
+            break
+        dest_file.write(chunk)
 
 
 def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None, shell_type="powershell", encrypt=True):
@@ -131,9 +183,21 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             
             script_name = os.path.basename(script_path)
             
-            # Create SMB connection for file upload
-            smb_conn = SMBConnection(target_ip, target_ip, timeout=30)
-            smb_conn.login(username, password, domain)
+            # Register SMB session for file upload
+            # Build full username with domain if provided
+            if domain:
+                full_username = f"{domain}\\{username}"
+            else:
+                full_username = username
+            
+            smbclient.register_session(
+                target_ip,
+                username=full_username,
+                password=password,
+                port=445,
+                encrypt=encrypt,
+                connection_timeout=DEFAULT_CONNECTION_TIMEOUT
+            )
             
             # Try to upload to shares with fallback: ADMIN$ first, then C$\Windows\Temp
             share = None
@@ -141,7 +205,10 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             
             # Try ADMIN$ first (requires admin privileges)
             try:
-                smb_conn.putFile('ADMIN$', script_name, open(script_path, 'rb').read)
+                admin_unc_path = _make_unc_path(target_ip, 'ADMIN$', script_name)
+                with open(script_path, 'rb') as local_file:
+                    with smb_open(admin_unc_path, mode='wb') as remote_file:
+                        _copy_file_chunked(local_file, remote_file)
                 share = 'ADMIN$'
                 remote_path = script_name
                 if verbose:
@@ -153,7 +220,10 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 # Fallback to C$\Windows\Temp
                 try:
                     temp_path = f"Windows\\Temp\\{script_name}"
-                    smb_conn.putFile('C$', temp_path, open(script_path, 'rb').read)
+                    temp_unc_path = _make_unc_path(target_ip, 'C$', temp_path)
+                    with open(script_path, 'rb') as local_file:
+                        with smb_open(temp_unc_path, mode='wb') as remote_file:
+                            _copy_file_chunked(local_file, remote_file)
                     share = 'C$'
                     remote_path = temp_path
                     if verbose:
@@ -305,21 +375,96 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 except Exception:
                     pass
             
-            # Clean up uploaded script file
-            if script_name and smb_conn and 'share' in locals() and 'remote_path' in locals():
+            # Clean up uploaded script file BEFORE deleting the session
+            if 'script_name' in locals() and 'share' in locals() and 'remote_path' in locals():
                 try:
-                    smb_conn.deleteFile(share, remote_path)
+                    script_unc_path = _make_unc_path(target_ip, share, remote_path)
+                    smb_remove(script_unc_path)
                     if verbose:
                         print(f"[*] Cleaned up script file: {share}\\{remote_path}")
                 except Exception:
                     pass
             
-            # Close SMB connection
-            if smb_conn:
+            # Clean up SMB session after removing the file
+            if 'script_path' in locals():
                 try:
-                    smb_conn.close()
+                    smbclient.delete_session(target_ip)
                 except Exception:
                     pass
+        except Exception:
+            pass
+
+
+@contextmanager
+def _smb_connect(target_ip, username, password, domain="", verbose=False, encrypt=None):
+    """
+    Context manager that handles SMB session registration for smbclient.
+    
+    Manages the shared boilerplate for SMB operations: domain extraction from
+    username, connectivity pre-check, session registration, authentication,
+    error classification, and guaranteed cleanup.
+    
+    Args:
+        target_ip: The IP address or hostname of the remote Windows machine.
+        username: The username for authentication (can be in DOMAIN\\username format).
+        password: The password for authentication.
+        domain: Optional domain name for domain-joined authentication.
+        verbose: If True, enable detailed logging.
+        encrypt: Optional SMB encryption setting (True, False, or None to let server decide).
+    
+    Yields:
+        A tuple of (target_ip, username, domain) for use in subsequent SMB operations.
+    
+    Raises:
+        SMBConnectionError: If port 445 is not reachable or the connection fails.
+        SMBAuthenticationError: If authentication fails due to invalid credentials.
+    """
+    # Extract domain from username if in DOMAIN\username format
+    if '\\' in username:
+        domain, username = username.split('\\', 1)
+
+    # Perform a quick connectivity check before attempting SMB
+    if not check_port_open(target_ip, 445, timeout=5):
+        raise SMBConnectionError(f"Port 445 not reachable on {target_ip}")
+
+    # Build full username with domain if provided
+    if domain:
+        full_username = f"{domain}\\{username}"
+    else:
+        full_username = username
+
+    try:
+        if verbose:
+            logging.info(f"Connecting to {target_ip}...")
+            logging.info(f"Authenticating as {full_username}...")
+
+        # Register SMB session with smbclient
+        # This doesn't actually connect yet - connection happens on first operation
+        smbclient.register_session(
+            target_ip,
+            username=full_username,
+            password=password,
+            port=445,
+            encrypt=encrypt,
+            connection_timeout=DEFAULT_CONNECTION_TIMEOUT
+        )
+
+        yield target_ip, username, domain
+
+    except Exception as e:
+        error_msg = str(e).lower()
+        auth_error_patterns = [
+            "logon_failure", "access_denied", "status_logon_failure",
+            "bad password", "wrong password", "invalid credentials",
+            "authentication", "unauthorized", "rejected", "logon failure"
+        ]
+        if any(pattern in error_msg for pattern in auth_error_patterns):
+            raise SMBAuthenticationError(f"Authentication failed: {e}")
+        raise SMBConnectionError(f"Connection failed to {target_ip}: {e}")
+    finally:
+        # Clean up the registered session to avoid leaving it in the global registry
+        try:
+            smbclient.delete_session(target_ip)
         except Exception:
             pass
 
@@ -352,9 +497,12 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
         ValueError: If the destination path format is invalid.
     """
     
-    # Extract domain from username if in DOMAIN\username format
+    # Extract domain from username early so log messages are accurate
     if '\\' in username:
         domain, username = username.split('\\', 1)
+    
+    if verbose:
+        logging.info(f"Preparing to copy to {target_ip} as {domain}\\{username}")
     
     # Validate source exists
     if not os.path.exists(source):
@@ -371,41 +519,15 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
     if len(dest_normalized) < 3 or dest_normalized[1] != ':':
         raise ValueError(f"Invalid destination format. Expected Windows path like 'C:\\path\\to\\file', got: {dest}")
     
-    # Use C$ admin share
-    share = "C$"
+    # Use admin share corresponding to the drive letter (e.g., C$, D$, etc.)
+    share = f"{dest_normalized[0]}$"
     # Remove "C:\" prefix to get the path relative to the share
     remote_base_path = dest_normalized[3:] if len(dest_normalized) > 3 else ""
     
     if verbose:
         print(f"[*] Share: {share}, Remote base path: {remote_base_path}")
     
-    # Perform a quick connectivity check before attempting SMB
-    if not check_port_open(target_ip, 445, timeout=5):
-        raise SMBConnectionError(f"Port 445 not reachable on {target_ip}")
-    
-    try:
-        # Establish SMB connection
-        if verbose:
-            print(f"[*] Connecting to {target_ip}...")
-        
-        smb_connection = SMBConnection(target_ip, target_ip, timeout=30)
-        
-        # Authenticate
-        if verbose:
-            print(f"[*] Authenticating as {domain}\\{username}...")
-        
-        try:
-            smb_connection.login(username, password, domain)
-        except Exception as e:
-            error_msg = str(e).lower()
-            auth_error_patterns = [
-                "logon_failure", "access_denied", "status_logon_failure",
-                "bad password", "wrong password", "invalid credentials"
-            ]
-            if any(pattern in error_msg for pattern in auth_error_patterns):
-                raise SMBAuthenticationError(f"Authentication failed for {username}: {e}")
-            raise
-        
+    with _smb_connect(target_ip, username, password, domain, verbose) as (server, username, domain):
         # Check if source is a file or directory
         if os.path.isfile(source):
             # Single file copy
@@ -415,20 +537,20 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
             remote_path = remote_base_path if remote_base_path else os.path.basename(source)
             
             if verbose:
-                print(f"[*] Uploading {source} ({file_size} bytes) to \\\\{target_ip}\\{share}\\{remote_path}...")
+                print(f"[*] Uploading {source} ({file_size} bytes) to \\\\{server}\\{share}\\{remote_path}...")
             
+            remote_unc_path = _make_unc_path(server, share, remote_path)
             with open(source, 'rb') as local_file:
-                smb_connection.putFile(share, remote_path, local_file.read)
+                with smb_open(remote_unc_path, mode='wb') as remote_file:
+                    _copy_file_chunked(local_file, remote_file)
             
             if status_callback:
                 status_callback("Copying 1/1 files...")
             
-            smb_connection.close()
-            
             if verbose:
                 print(f"[+] File copied successfully: {file_size} bytes")
             
-            return f"Copied {os.path.basename(source)} ({file_size} bytes) to \\\\{target_ip}\\{share}\\{remote_path}"
+            return f"Copied {os.path.basename(source)} ({file_size} bytes) to \\\\{server}\\{share}\\{remote_path}"
         
         else:
             # Directory copy - recursive
@@ -453,22 +575,22 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                 else:
                     remote_dir = remote_base_path
                 
-                # Create remote directories (SMB createDirectory for each level)
+                # Create remote directories using smbclient
                 if remote_dir:
-                    # Create directory hierarchy
-                    dir_parts = remote_dir.split('\\')
-                    current_path = ""
-                    for part in dir_parts:
-                        if not part:
-                            continue
-                        current_path = current_path + "\\" + part if current_path else part
-                        try:
-                            smb_connection.createDirectory(share, current_path)
+                    remote_dir_unc = _make_unc_path(server, share, remote_dir)
+                    try:
+                        # makedirs creates all parent directories if they don't exist
+                        smbclient.makedirs(remote_dir_unc, exist_ok=True)
+                        if verbose:
+                            print(f"[*] Created directory: \\\\{server}\\{share}\\{remote_dir}")
+                    except smbclient.SMBException as e:
+                        # Ignore only "already exists" errors; re-raise others
+                        msg = str(e).lower()
+                        if "already exists" in msg or "status_object_name_collision" in msg:
                             if verbose:
-                                print(f"[*] Created directory: \\\\{target_ip}\\{share}\\{current_path}")
-                        except Exception:
-                            # Directory may already exist, ignore
-                            pass
+                                print(f"[*] Directory already exists: \\\\{server}\\{share}\\{remote_dir}")
+                        else:
+                            raise
                 
                 # Copy each file
                 for filename in files:
@@ -481,10 +603,12 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                     file_size = os.path.getsize(local_file_path)
                     
                     if verbose:
-                        print(f"[*] Uploading {local_file_path} ({file_size} bytes) to \\\\{target_ip}\\{share}\\{remote_file_path}...")
+                        print(f"[*] Uploading {local_file_path} ({file_size} bytes) to \\\\{server}\\{share}\\{remote_file_path}...")
                     
-                    with open(local_file_path, 'rb') as f:
-                        smb_connection.putFile(share, remote_file_path, f.read)
+                    remote_file_unc = _make_unc_path(server, share, remote_file_path)
+                    with open(local_file_path, 'rb') as local_file:
+                        with smb_open(remote_file_unc, mode='wb') as remote_file:
+                            _copy_file_chunked(local_file, remote_file)
                     
                     total_files += 1
                     total_bytes += file_size
@@ -492,24 +616,158 @@ def run_smb_copy(target_ip, username, password, domain="", source="", dest="", v
                     if status_callback:
                         status_callback(f"Copying {total_files}/{total_file_count} files...")
             
-            smb_connection.close()
-            
             if verbose:
                 print(f"[+] Directory copied successfully: {total_files} files, {total_bytes} bytes")
             
-            return f"Copied {total_files} file(s) ({total_bytes} bytes) to \\\\{target_ip}\\{share}\\{remote_base_path}"
+            return f"Copied {total_files} file(s) ({total_bytes} bytes) to \\\\{server}\\{share}\\{remote_base_path}"
+
+
+def run_smb_download(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None):
+    """
+    Download a file or directory from a remote Windows host to the local system using SMB.
     
-    except SMBAuthenticationError:
-        raise
-    except SMBConnectionError:
-        raise
-    except Exception as e:
-        error_msg = str(e).lower()
-        auth_error_patterns = [
-            "logon_failure", "access_denied", "status_logon_failure",
-            "bad password", "wrong password", "invalid credentials",
-            "authentication", "unauthorized", "rejected"
-        ]
-        if any(pattern in error_msg for pattern in auth_error_patterns):
-            raise SMBAuthenticationError(f"Authentication failed: {e}")
-        raise
+    This function establishes an SMB connection and downloads a file or directory
+    from the remote host to a specified local path. If the source is a directory,
+    it recursively downloads all files and subdirectories.
+    
+    Args:
+        target_ip: The IP address or hostname of the remote Windows machine.
+        username: The username for authentication (can be in DOMAIN\\username format).
+        password: The password for authentication.
+        domain: Optional domain name for domain-joined authentication.
+        source: Remote source as a local Windows path (e.g., "C:\\Windows\\Temp\\file.exe").
+        dest: Path to the local destination file or directory.
+        verbose: If True, print detailed status messages during execution.
+        status_callback: Optional callable(message) to report execution progress.
+    
+    Returns:
+        A string containing a success message with files/bytes transferred.
+    
+    Raises:
+        SMBConnectionError: If the connection to the target host fails.
+        SMBAuthenticationError: If authentication fails due to invalid credentials.
+        ValueError: If the source path format is invalid.
+    """
+    
+    # Extract domain from username early so log messages are accurate
+    if '\\' in username:
+        domain, username = username.split('\\', 1)
+    
+    if verbose:
+        logging.info(f"Preparing to download from {target_ip} as {domain}\\{username}")
+    
+    # Parse source as a remote Windows path (e.g., "C:\Windows\Temp\file.exe")
+    # Convert to SMB path using C$ share
+    source_normalized = source.replace('/', '\\')
+    source_normalized = source_normalized.lstrip('\\')
+    
+    if len(source_normalized) < 3 or source_normalized[1] != ':':
+        raise ValueError(f"Invalid source format. Expected Windows path like 'C:\\path\\to\\file', got: {source}")
+    
+    # Use admin share corresponding to the drive letter (e.g., C$, D$, etc.)
+    share = f"{source_normalized[0]}$"
+    remote_base_path = source_normalized[3:] if len(source_normalized) > 3 else ""
+    
+    if verbose:
+        logging.info(f"Share: {share}, Remote base path: {remote_base_path}")
+    
+    with _smb_connect(target_ip, username, password, domain, verbose) as (server, username, domain):
+        # Determine if remote source is a file or directory
+        remote_unc_path = _make_unc_path(server, share, remote_base_path)
+        
+        # Check if path exists and determine if it's a directory
+        is_directory = False
+        if smb_exists(remote_unc_path):
+            try:
+                is_directory = smb_isdir(remote_unc_path)
+            except (OSError, IOError):
+                # If we can't determine type, assume it's a file
+                is_directory = False
+        else:
+            raise FileNotFoundError(f"Remote path does not exist: {remote_unc_path}")
+        
+        if not is_directory:
+            # Single file download
+            if status_callback:
+                status_callback("Downloading 1 file...")
+            
+            # If dest is an existing directory, append the source filename
+            if os.path.isdir(dest):
+                dest = os.path.join(dest, os.path.basename(remote_base_path))
+            
+            # Ensure local destination directory exists
+            dest_dir = os.path.dirname(dest)
+            if dest_dir:
+                os.makedirs(dest_dir, exist_ok=True)
+            
+            if verbose:
+                logging.info(f"Downloading \\\\{server}\\{share}\\{remote_base_path} to {dest}...")
+            
+            with smb_open(remote_unc_path, mode='rb') as remote_file:
+                with open(dest, 'wb') as local_file:
+                    _copy_file_chunked(remote_file, local_file)
+            
+            file_size = os.path.getsize(dest)
+            
+            if status_callback:
+                status_callback("Downloading 1/1 files...")
+            
+            if verbose:
+                logging.info(f"File downloaded successfully: {file_size} bytes")
+            
+            return f"Downloaded {os.path.basename(remote_base_path)} ({file_size} bytes) from \\\\{server}\\{share}\\{remote_base_path}"
+        
+        else:
+            # Directory download - recursive
+            total_files = 0
+            total_bytes = 0
+            
+            if status_callback:
+                status_callback("Scanning remote directory...")
+            
+            # Use smbclient's walk function to recursively download
+            for remote_root, dirs, files in smb_walk(remote_unc_path):
+                # Calculate relative path from source
+                # remote_root is like \\server\share\path\subdir
+                # We need to get the relative part after remote_unc_path
+                if remote_root == remote_unc_path:
+                    rel_path = ""
+                else:
+                    # Strip the base path
+                    rel_path = remote_root[len(remote_unc_path):].lstrip('\\/')
+                
+                # Create local directory
+                if rel_path:
+                    local_dir = os.path.join(dest, rel_path.replace('\\', os.sep))
+                else:
+                    local_dir = dest
+                os.makedirs(local_dir, exist_ok=True)
+                
+                # Download each file
+                for filename in files:
+                    # Construct remote file path using UNC path separator
+                    if not remote_root.endswith('\\'):
+                        remote_file_path = remote_root + '\\' + filename
+                    else:
+                        remote_file_path = remote_root + filename
+                    
+                    local_file_path = os.path.join(local_dir, filename)
+                    
+                    if verbose:
+                        logging.info(f"Downloading {remote_file_path} to {local_file_path}...")
+                    
+                    with smb_open(remote_file_path, mode='rb') as remote_file:
+                        with open(local_file_path, 'wb') as local_file:
+                            _copy_file_chunked(remote_file, local_file)
+                    
+                    file_size = os.path.getsize(local_file_path)
+                    total_files += 1
+                    total_bytes += file_size
+                    
+                    if status_callback:
+                        status_callback(f"Downloaded {total_files} file(s)...")
+            
+            if verbose:
+                logging.info(f"Directory downloaded successfully: {total_files} files, {total_bytes} bytes")
+            
+            return f"Downloaded {total_files} file(s) ({total_bytes} bytes) from \\\\{server}\\{share}\\{remote_base_path}"
