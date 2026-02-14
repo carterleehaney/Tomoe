@@ -508,8 +508,8 @@ if __name__ == "__main__":
         parser.error("--os linux is only supported with the ssh protocol")
     
     # Validate protocol-specific arguments.
-    if args.protocol == "winrm" and args.shell != "powershell":
-        parser.error("--shell argument is only valid for SMB protocol")
+    if args.protocol != "smb" and args.shell != "powershell":
+        parser.error("--shell is only supported when --protocol smb; for winrm and ssh, PowerShell is always used")
     
     # Extract source/dest and download flag from the parsed arguments.
     source = None
