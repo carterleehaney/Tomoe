@@ -1,10 +1,10 @@
 ## Tomoe
 
-Tomoe is a python utility for cross-platform windows administration over multiple protocols in case of fail-over.
+Tomoe is a python utility for remote administration over multiple protocols with credential fail-over across hosts.
 
-WinRM support is from the [pypsrp](https://pypi.org/project/pypsrp/) project.
-
-SMB (`psexec`) functionality is from the [pypsexec](https://pypi.org/project/pypsexec/) project.
+- **WinRM** — [pypsrp](https://pypi.org/project/pypsrp/)
+- **SMB** — [pypsexec](https://pypi.org/project/pypsexec/)
+- **SSH** — [paramiko](https://pypi.org/project/paramiko/)
 
 ```PowerShell
 PS C:\Users\carte\Documents\GitHub\Tomoe> py .\tomoe.py winrm -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --command "whoami"
@@ -59,12 +59,12 @@ Ensure you have all requirements installed.
 ```PowerShell
 py tomoe.py -h
 
-usage: tomoe.py {smb, winrm} -i <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --source <file> --dest <path>] -v
+usage: tomoe.py {smb, winrm, ssh} -i <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]
 
-Tomoe is a python utility for cross-platform windows administration over multiple protocols in case of fail-over.
+Tomoe is a python utility for remote administration over multiple protocols in case of fail-over.
 
 positional arguments:
-  {smb,winrm}           protocol to use for remote administration
+  {smb,winrm,ssh}       protocol to use for remote administration
 
 options:
   -h, --help            show this help message and exit
@@ -74,12 +74,17 @@ options:
                         username or path to file with usernames (one per line)
   -p, --password PASSWORD
                         password or path to file with passwords (one per line)
-  -s, --script SCRIPT   local path to PowerShell script to execute
+  --os {windows,linux}  target host OS (default: windows). Only applies to SSH.
+  -s, --script SCRIPT   local path to script to execute (PowerShell on Windows, bash on Linux)
   -c, --command COMMAND
-                        powershell command to execute
-  --source SOURCE       local path to file or directory to copy (use with --dest)
-  --dest DEST           remote destination as local Windows path, e.g. C:\Windows\Temp\file.exe (use with --source)
+                        command to execute (PowerShell on Windows, shell on Linux)
+  --upload SOURCE DEST  upload local SOURCE to remote DEST
+  --download SOURCE DEST
+                        download remote SOURCE to local DEST
   -a, --args ARGS       arguments to pass to the script
+  --shell {powershell,cmd}
+                        shell type for SMB protocol (default: powershell)
+  --no-encrypt          disable SMB encryption (encryption is enabled by default)
   -v, --verbose         show verbose status messages
   -t, --threads THREADS
                         maximum concurrent threads (default: 10)
@@ -88,9 +93,15 @@ options:
 
 ## Features
 
+#### Protocols
+
+- **WinRM** — Remote PowerShell; commands and scripts run in the context of the authenticated user.
+- **SMB** — PsExec-style execution; commands and scripts run as `NT Authority\SYSTEM`. Supports `--shell powershell|cmd` and `--no-encrypt` to disable SMB encryption.
+- **SSH** — Remote shell and file transfer for Windows or Linux (`--os windows|linux`). Uses Paramiko; PowerShell on Windows, bash on Linux.
+
 #### Command & Script Execution
 
-Tomoe supports command execution and PowerShell script execution. When using the SMB protocol option, commands and scripts run as `NT Authority\SYSTEM`.
+Tomoe supports command execution and script execution. When using the SMB protocol, commands and scripts run as `NT Authority\SYSTEM`.
 
 ```PowerShell
 ✓ 192.168.56.23 - Success (user: Administrator)
@@ -109,7 +120,7 @@ When using the WinRM protocol option, commands and scripts run in the context of
 Arguments have a small quirk to make note of. When passing arguments to a script, please add a `=` character after your -a/--args argument. For example, the script being executed will execute a command passed to the "-Command" argument. You can wrap your arguments in either `'` or `"` characters, depending on if your arguments for the actual script require one or the other.
 
 ```PowerShell
-py .\tomoe.py winrm -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --script .\Scripts\Command.ps1 --args='-Command "whoami"'
+py .\tomoe.py winrm -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords -s .\Scripts\Command.ps1 -a='-Command "whoami"'
 ```
 
 ```PowerShell
@@ -120,15 +131,13 @@ py .\tomoe.py winrm -i .\Credentials\hosts -u .\Credentials\usernames -p .\Crede
 
 #### File Upload
 
-Tomoe supports file upload over both protocols, using different methods. SMB is obviously preferred, but WinRM is also supported, albeit slower. Both have very similar syntax, but there could be unexpected behavior between the two.
+Use `--upload SOURCE DEST` to copy files or directories from your machine to the remote host(s). Supported with WinRM, SMB, and SSH. SMB uses the administrative C$ share by default and is typically faster for Windows targets.
 
-To copy one file, you can do the following. SMB is used in this example.
+Single file:
 
 ```PowerShell
-py .\tomoe.py smb -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --source .\test.txt --dest C:\test.txt
+py .\tomoe.py smb -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --upload .\test.txt C:\test.txt
 ```
-
-By default, SMB uses the administrative C$ share.
 
 ```PowerShell
 ✓ 192.168.56.12 - Success (user: Administrator)
@@ -136,13 +145,11 @@ By default, SMB uses the administrative C$ share.
     Copied test.txt (13 bytes) to \\192.168.56.12\C$\test.txt
 ```
 
-To copy a directory (and it's recursive directories!) to another directory, you can do the following.
+Directory (recursive):
 
 ```PowerShell
-py .\tomoe.py smb -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --source .\Test\ --dest C:\
+py .\tomoe.py smb -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --upload .\Test\ C:\
 ```
-
-This will place the contents of that directory in whatever directory you specified. For example, this will place the contents of "Test" into the C:\ directory.
 
 ```PowerShell
 ✓ 192.168.56.22 - Success (user: Administrator)
@@ -150,13 +157,10 @@ This will place the contents of that directory in whatever directory you specifi
     Copied 2 file(s) (26 bytes) to \\192.168.56.22\C$\
 ```
 
-<img width="1406" height="791" alt="image" src="https://github.com/user-attachments/assets/47e15031-5cd7-4ac7-b4af-3bcb40e060ec" />
-
-
-You can also specify a new directory to create to output files to. For example, this will create a new folder "Test2" and put the contents of "Test" inside of it. This works with both protocols.
+Creating a new directory on the remote host (e.g. `C:\Test2`) works with SMB, WinRM, and SSH:
 
 ```PowerShell
-py .\tomoe.py winrm -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --source .\Test\ --dest C:\Test2
+py .\tomoe.py winrm -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --upload .\Test\ C:\Test2
 ```
 
 ```PowerShell
@@ -164,4 +168,20 @@ py .\tomoe.py winrm -i .\Credentials\hosts -u .\Credentials\usernames -p .\Crede
   Output:
     Copied 2 file(s) (26 bytes) to 192.168.56.23:C:\Test2
 ```
+
+#### File Download
+
+Use `--download SOURCE DEST` to pull files or directories from the remote host(s) to your machine. Supported with WinRM, SMB, and SSH. When targeting multiple hosts, Tomoe creates per-host subdirectories under the local `DEST` so results do not overwrite each other.
+
+```PowerShell
+py .\tomoe.py winrm -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --download C:\logs\app.log .\results
+```
+
+For SSH on Linux targets, use `--os linux` and remote paths as on the server (e.g. `/var/log/app.log`).
+
+#### Output Files
+
+Use `-o DIR` to write each host's command or script output to a file under `DIR` (e.g. `DIR\<host>.txt`).
+
+<img width="1406" height="791" alt="image" src="https://github.com/user-attachments/assets/47e15031-5cd7-4ac7-b4af-3bcb40e060ec" />
 
