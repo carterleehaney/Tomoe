@@ -656,20 +656,27 @@ def run_ssh_copy(target_ip, username, password, domain="", source="", dest="", v
                             print(f"[*] Created directory: {remote_dir}")
                     except IOError:
                         # Directory may already exist, or we need to create parent dirs.
-                        # Fall back to creating via SSH command for nested paths.
-                        try:
-                            if is_linux:
-                                mkdir_cmd = f'mkdir -p "{remote_dir}"'
-                            else:
-                                mkdir_cmd = f'powershell.exe -NoProfile -NonInteractive -Command "New-Item -ItemType Directory -Path \'{remote_dir}\' -Force | Out-Null"'
-                            stdin, stdout, stderr = client.exec_command(mkdir_cmd, timeout=30)
-                            stdout.channel.recv_exit_status()
-                            if verbose:
-                                print(f"[*] Created directory (via cmd): {remote_dir}")
-                        except Exception as e:
-                            # Swallow directory creation failures here; file uploads may still fail later.
-                            if verbose:
-                                print(f"[!] Failed to create directory (via cmd): {remote_dir} ({e})")
+                        # Fall back to creating nested directories via SFTP to avoid shell injection.
+                        path_sep = '/' if is_linux else '\\'
+                        parts = [p for p in remote_dir.split(path_sep) if p]
+                        # Preserve leading separator for absolute paths.
+                        current = path_sep if remote_dir.startswith(path_sep) else ""
+                        for part in parts:
+                            if current and not current.endswith(path_sep):
+                                current += path_sep
+                            current += part
+                            try:
+                                # Check if the directory already exists.
+                                sftp.stat(current)
+                            except IOError:
+                                try:
+                                    sftp.mkdir(current)
+                                    if verbose:
+                                        print(f"[*] Created directory (nested): {current}")
+                                except IOError:
+                                    # Directory creation may fail if it was created concurrently; ignore.
+                                    if verbose:
+                                        print(f"[!] Failed to create nested directory: {current}")
                 
                 # Copy each file.
                 total_file_count = len(files_to_copy)
