@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import time
 from os.path import isfile, isdir, exists
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -10,9 +11,9 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from smb import run_psexec, run_smb_copy
-from wsman import run_winrm, run_winrm_copy
-from ssh import run_ssh, run_ssh_copy
+from smb import run_psexec, run_smb_copy, run_smb_download
+from wsman import run_winrm, run_winrm_copy, run_winrm_download
+from ssh import run_ssh, run_ssh_copy, run_ssh_download
 
 
 @dataclass
@@ -88,7 +89,10 @@ def execute_on_host(
     status_lock: Lock,
     source: Optional[str] = None,
     dest: Optional[str] = None,
-    target_os: str = "windows"
+    target_os: str = "windows",
+    download: bool = False,
+    shell_type: str = "powershell",
+    encrypt: bool = True
 ) -> HostResult:
     """Execute command on a single host, trying credential permutations until success."""
     
@@ -117,8 +121,47 @@ def execute_on_host(
             status_callback = make_status_callback(username)
             
             try:
-                # Check if this is a file copy operation (smb with --source/--dest)
-                if protocol == "smb" and source and dest:
+                # Download operation (remote -> local)
+                if protocol == "smb" and source and dest and download:
+                    output = run_smb_download(
+                        target_ip=host,
+                        username=username,
+                        password=password,
+                        domain=domain,
+                        source=source,
+                        dest=dest,
+                        verbose=verbose,
+                        status_callback=status_callback,
+                    )
+                    update_status("success", username, "File downloaded.")
+                    return HostResult(
+                        host=host,
+                        success=True,
+                        username=username,
+                        message="File downloaded successfully.",
+                        output=output
+                    )
+                elif protocol == "winrm" and source and dest and download:
+                    output = run_winrm_download(
+                        target_ip=host,
+                        username=username,
+                        password=password,
+                        domain=domain,
+                        source=source,
+                        dest=dest,
+                        verbose=verbose,
+                        status_callback=status_callback,
+                    )
+                    update_status("success", username, "File downloaded.")
+                    return HostResult(
+                        host=host,
+                        success=True,
+                        username=username,
+                        message="File downloaded successfully.",
+                        output=output
+                    )
+                # Upload operation (local -> remote)
+                elif protocol == "smb" and source and dest:
                     output = run_smb_copy(
                         target_ip=host,
                         username=username,
@@ -129,12 +172,12 @@ def execute_on_host(
                         verbose=verbose,
                         status_callback=status_callback,
                     )
-                    update_status("success", username, "File copied.")
+                    update_status("success", username, "File uploaded.")
                     return HostResult(
                         host=host,
                         success=True,
                         username=username,
-                        message="File copied successfully.",
+                        message="File uploaded successfully.",
                         output=output
                     )
                 elif protocol == "smb":
@@ -148,6 +191,8 @@ def execute_on_host(
                         script_args=script_args,
                         verbose=verbose,
                         status_callback=status_callback,
+                        shell_type=shell_type,
+                        encrypt=encrypt
                     )
                 elif protocol == "winrm" and source and dest:
                     output = run_winrm_copy(
@@ -160,12 +205,12 @@ def execute_on_host(
                         verbose=verbose,
                         status_callback=status_callback,
                     )
-                    update_status("success", username, "File copied.")
+                    update_status("success", username, "File uploaded.")
                     return HostResult(
                         host=host,
                         success=True,
                         username=username,
-                        message="File copied successfully.",
+                        message="File uploaded successfully.",
                         output=output
                     )
                 elif protocol == "winrm":
@@ -179,6 +224,26 @@ def execute_on_host(
                         script_args=script_args,
                         verbose=verbose,
                         status_callback=status_callback,
+                    )
+                elif protocol == "ssh" and source and dest and download:
+                    output = run_ssh_download(
+                        target_ip=host,
+                        username=username,
+                        password=password,
+                        domain=domain,
+                        source=source,
+                        dest=dest,
+                        verbose=verbose,
+                        status_callback=status_callback,
+                        target_os=target_os,
+                    )
+                    update_status("success", username, "File downloaded.")
+                    return HostResult(
+                        host=host,
+                        success=True,
+                        username=username,
+                        message="File downloaded successfully.",
+                        output=output
                     )
                 elif protocol == "ssh" and source and dest:
                     output = run_ssh_copy(
@@ -269,7 +334,10 @@ def run_concurrent_execution(
     max_workers: int = 10,
     source: Optional[str] = None,
     dest: Optional[str] = None,
-    target_os: str = "windows"
+    target_os: str = "windows",
+    download: bool = False,
+    shell_type: str = "powershell",
+    encrypt: bool = True
 ) -> list[HostResult]:
     """Run execution concurrently across all hosts with live status display."""
     
@@ -299,6 +367,14 @@ def run_concurrent_execution(
         
         try:
             with ThreadPoolExecutor(max_workers=min(max_workers, len(hosts))) as executor:
+                # For multi-host downloads, create per-host subdirectories
+                # to prevent files from overwriting each other.
+                use_host_subdirs = download and source and dest and len(hosts) > 1
+                
+                if use_host_subdirs:
+                    for host in hosts:
+                        os.makedirs(os.path.join(dest, host), exist_ok=True)
+                
                 # Submit all host tasks.
                 future_to_host = {
                     executor.submit(
@@ -315,8 +391,11 @@ def run_concurrent_execution(
                         host_statuses,
                         status_lock,
                         source,
-                        dest,
-                        target_os
+                        os.path.join(dest, host) if use_host_subdirs else dest,
+                        target_os,
+                        download,
+                        shell_type,
+                        encrypt
                     ): host
                     for host in hosts
                 }
@@ -392,7 +471,7 @@ def write_output_files(results: list[HostResult], output_dir: str, console: Cons
 if __name__ == "__main__":
     # Parse arguments.
     parser = argparse.ArgumentParser(
-        usage="tomoe.py {smb, winrm, ssh} -i <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --source <file> --dest <path>] -v",
+        usage="tomoe.py {smb, winrm, ssh} -i <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]",
         description="Tomoe is a python utility for remote administration over multiple protocols in case of fail-over."
     )
     parser.add_argument("protocol", choices=["smb", "winrm", "ssh"], help="protocol to use for remote administration")
@@ -409,12 +488,15 @@ if __name__ == "__main__":
     exec_group.add_argument("-s", "--script", help="local path to script to execute (PowerShell on Windows, bash on Linux)")
     exec_group.add_argument("-c", "--command", help="command to execute (PowerShell on Windows, shell on Linux)")
     
-    # File copy arguments (for smb/winrm/ssh protocol file transfer).
-    parser.add_argument("--source", help="local path to file or directory to copy (use with --dest)")
-    parser.add_argument("--dest", help="remote destination path, e.g. C:\\Windows\\Temp\\file.exe or /tmp/file (use with --source)")
+    # File transfer (mutually exclusive: --upload or --download, each takes source + dest).
+    transfer_group = parser.add_mutually_exclusive_group(required=False)
+    transfer_group.add_argument("--upload", nargs=2, metavar=("SOURCE", "DEST"), help="upload local SOURCE to remote DEST")
+    transfer_group.add_argument("--download", nargs=2, metavar=("SOURCE", "DEST"), help="download remote SOURCE to local DEST")
     
     # Arguments to pass to the script.
     parser.add_argument("-a", "--args", default="", help="arguments to pass to the script")
+    parser.add_argument("--shell", choices=["powershell", "cmd"], default="powershell", help="shell type for SMB protocol (default: powershell)")
+    parser.add_argument("--no-encrypt", dest="encrypt", action="store_false", default=True, help="disable SMB encryption (encryption is enabled by default)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
     parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
     parser.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
@@ -425,19 +507,34 @@ if __name__ == "__main__":
     if args.target_os == "linux" and args.protocol != "ssh":
         parser.error("--os linux is only supported with the ssh protocol")
     
-    # Validate arguments based on protocol and operation mode.
-    if args.source or args.dest:
-        # File/directory copy mode
-        if not args.source or not args.dest:
-            parser.error("both --source and --dest are required for file copy")
-        if not exists(args.source):
-            parser.error(f"source not found: {args.source}")
+    # Validate protocol-specific arguments.
+    if args.protocol == "winrm" and args.shell != "powershell":
+        parser.error("--shell argument is only valid for SMB protocol")
+    
+    # Extract source/dest and download flag from the parsed arguments.
+    source = None
+    dest = None
+    is_download = False
+    
+    if args.upload:
+        source, dest = args.upload
         if args.script or args.command:
-            parser.error("--source/--dest cannot be used with --script or --command")
+            parser.error("--upload cannot be used with --script or --command")
+        if not exists(source):
+            parser.error(f"local source not found: {source}")
+    elif args.download:
+        source, dest = args.download
+        is_download = True
+        if args.script or args.command:
+            parser.error("--download cannot be used with --script or --command")
+        # Validate the local destination's parent directory exists
+        dest_parent = os.path.dirname(os.path.abspath(dest))
+        if not exists(dest_parent):
+            parser.error(f"local destination parent directory not found: {dest_parent}")
     else:
         # Command execution mode
         if not args.script and not args.command:
-            parser.error("either --script, --command, or --source/--dest is required")
+            parser.error("either --script, --command, --upload, or --download is required")
     
     # Set logging level based on verbose flag.
     if args.verbose:
@@ -463,6 +560,12 @@ if __name__ == "__main__":
     console.print(f"  Targets: {len(hosts)} host(s)")
     console.print(f"  Credentials: {len(usernames)} user(s) x {len(passwords)} password(s)")
     console.print(f"  Protocol: {args.protocol}")
+    if args.upload:
+        console.print(f"  Operation: Upload {source} -> {dest}")
+    elif args.download:
+        console.print(f"  Operation: Download {source} -> {dest}")
+        if len(hosts) > 1:
+            console.print(f"  Note: Per-host subdirectories will be created under {dest}")
     console.print()
 
     # Run concurrent execution.
@@ -477,9 +580,12 @@ if __name__ == "__main__":
         script_args=args.args,
         verbose=args.verbose,
         max_workers=args.threads,
-        source=args.source,
-        dest=args.dest,
-        target_os=args.target_os
+        source=source,
+        dest=dest,
+        target_os=args.target_os,
+        download=is_download,
+        shell_type=args.shell,
+        encrypt=args.encrypt
     )
     
     # Print final results.

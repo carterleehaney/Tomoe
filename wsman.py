@@ -266,7 +266,7 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
             if os.path.isfile(source):
                 # Single file copy - mimic SMB behavior
                 if status_callback:
-                    status_callback("Copying 0/1 files...")
+                    status_callback("Copying 1 file...")
                 file_size = os.path.getsize(source)
                 
                 # Normalize destination path and parse like SMB does
@@ -359,7 +359,8 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
                     read_timeout=30,
                 ) as client:
                     for remote_dir in dirs_to_create:
-                        mkdir_script = f"New-Item -ItemType Directory -Path '{remote_dir}' -Force | Out-Null"
+                        remote_dir_escaped = remote_dir.replace("'", "''")
+                        mkdir_script = f"New-Item -ItemType Directory -Path '{remote_dir_escaped}' -Force | Out-Null"
                         try:
                             client.execute_ps(mkdir_script)
                             if verbose:
@@ -435,4 +436,258 @@ def run_winrm_copy(target_ip, username, password, domain="", source="", dest="",
         # For any other exception, log it in verbose mode and re-raise.
         if verbose:
             print(f"[!] WinRM copy failed: {e}")
+        raise
+
+
+def run_winrm_download(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None):
+    """
+    Download a file or directory from a remote Windows host to the local system using WinRM/PSRP.
+    
+    This function uses the pypsrp library's Client class to download files via
+    the PowerShell Remoting Protocol. It supports both single file downloads
+    and recursive directory downloads.
+    
+    Args:
+        target_ip: The IP address or hostname of the remote Windows machine.
+        username: The username for authentication (can be in DOMAIN\\username format).
+        password: The password for authentication.
+        domain: Optional domain name for domain-joined authentication.
+        source: Remote source as a local Windows path (e.g., "C:\\Windows\\Temp\\file.exe").
+        dest: Path to the local destination file or directory.
+        verbose: If True, print detailed status messages during execution.
+        status_callback: Optional callable(message) to report execution progress.
+    
+    Returns:
+        A string containing a success message with files/bytes transferred.
+    
+    Raises:
+        WinRMConnectionError: If the connection to the target host fails.
+        WinRMAuthenticationError: If authentication fails due to invalid credentials.
+    """
+    
+    # Perform a quick connectivity check before attempting WinRM.
+    if not check_port_open(target_ip, 5985, timeout=5):
+        raise WinRMConnectionError(f"Port 5985 not reachable on {target_ip}")
+    
+    # Construct the authentication username.
+    if domain:
+        auth_username = f"{domain}\\{username}"
+    else:
+        auth_username = username
+    
+    # Normalize the remote source path
+    source_normalized = source.replace('/', '\\')
+    
+    try:
+        # First, determine if the remote source is a file or directory using PowerShell
+        if status_callback:
+            status_callback("Checking remote path...")
+        
+        with Client(
+            target_ip,
+            username=auth_username,
+            password=password,
+            port=5985,
+            ssl=False,
+            auth="ntlm",
+            encryption="auto",
+            connection_timeout=30,
+            read_timeout=30,
+        ) as client:
+            # Check if the remote path is a directory
+            # Escape single quotes for safe embedding in PowerShell single-quoted strings
+            source_escaped = source_normalized.replace("'", "''")
+            check_script = f"if (Test-Path -LiteralPath '{source_escaped}' -PathType Container) {{ 'DIRECTORY' }} elseif (Test-Path -LiteralPath '{source_escaped}' -PathType Leaf) {{ 'FILE' }} else {{ 'NOTFOUND' }}"
+            output, streams, had_errors = client.execute_ps(check_script)
+            path_type = output.strip()
+        
+        if path_type == 'NOTFOUND':
+            raise FileNotFoundError(f"Remote path not found: {source}")
+        
+        if path_type == 'FILE':
+            # Single file download
+            if status_callback:
+                status_callback("Downloading 0/1 files...")
+            
+            # If dest is an existing directory, append the source filename
+            if os.path.isdir(dest):
+                dest = os.path.join(dest, os.path.basename(source_normalized))
+            
+            # Ensure local destination directory exists
+            dest_dir = os.path.dirname(dest)
+            if dest_dir:
+                os.makedirs(dest_dir, exist_ok=True)
+            
+            if verbose:
+                print(f"[*] Downloading {target_ip}:{source_normalized} to {dest}...")
+            
+            with Client(
+                target_ip,
+                username=auth_username,
+                password=password,
+                port=5985,
+                ssl=False,
+                auth="ntlm",
+                encryption="auto",
+                connection_timeout=30,
+                read_timeout=30,
+            ) as client:
+                client.fetch(source_normalized, dest)
+            
+            file_size = os.path.getsize(dest)
+            
+            if status_callback:
+                status_callback("Downloading 1/1 files...")
+            
+            if verbose:
+                print(f"[+] File downloaded successfully: {file_size} bytes")
+            
+            return f"Downloaded {os.path.basename(source_normalized)} ({file_size} bytes) from {target_ip}:{source_normalized}"
+        
+        else:
+            # Directory download - recursive
+            if status_callback:
+                status_callback("Enumerating remote directory...")
+            
+            # Use PowerShell to enumerate all files and directories recursively
+            # Returns tab-separated lines: RelativePath\tType (File or Directory)
+            # Escape single quotes for safe embedding in PowerShell single-quoted strings
+            source_escaped = source_normalized.replace("'", "''")
+            enum_script = (
+                f"Get-ChildItem -LiteralPath '{source_escaped}' -Recurse -Force | "
+                f"ForEach-Object {{ "
+                f"$rel = $_.FullName.Substring('{source_escaped}'.Length).TrimStart('\\'); "
+                f"$type = if ($_.PSIsContainer) {{ 'D' }} else {{ 'F' }}; "
+                f"\"$rel`t$type\" }}"
+            )
+            
+            with Client(
+                target_ip,
+                username=auth_username,
+                password=password,
+                port=5985,
+                ssl=False,
+                auth="ntlm",
+                encryption="auto",
+                connection_timeout=30,
+                read_timeout=30,
+            ) as client:
+                output, streams, had_errors = client.execute_ps(enum_script)
+            
+            # Check for PowerShell errors during enumeration
+            if had_errors:
+                error_messages = []
+                if streams and streams.error:
+                    error_messages = [str(err) for err in streams.error]
+                error_detail = "; ".join(error_messages) if error_messages else "Unknown error"
+                raise RuntimeError(f"Failed to enumerate remote directory '{source_normalized}': {error_detail}")
+            
+            # Parse enumeration results
+            dirs_to_create = []
+            files_to_download = []
+            
+            if output and output.strip():
+                for line in output.strip().split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split('\t')
+                    if len(parts) != 2:
+                        continue
+                    rel_path, entry_type = parts[0].strip(), parts[1].strip()
+                    if entry_type == 'D':
+                        dirs_to_create.append(rel_path)
+                    elif entry_type == 'F':
+                        files_to_download.append(rel_path)
+            
+            if not dirs_to_create and not files_to_download:
+                if verbose:
+                    print(f"[*] Remote directory is empty: {source_normalized}")
+                return f"Remote directory is empty: {target_ip}:{source_normalized}"
+            
+            # Create local directory structure
+            os.makedirs(dest, exist_ok=True)
+            for rel_dir in dirs_to_create:
+                local_dir = os.path.join(dest, rel_dir)
+                os.makedirs(local_dir, exist_ok=True)
+                if verbose:
+                    print(f"[*] Created local directory: {local_dir}")
+            
+            # Download each file
+            total_files = 0
+            total_bytes = 0
+            total_file_count = len(files_to_download)
+            
+            if status_callback:
+                status_callback(f"Downloading 0/{total_file_count} files...")
+            
+            # Normalize source path to avoid duplicate backslashes when joining
+            source_normalized = source_normalized.rstrip('\\')
+            
+            for rel_file in files_to_download:
+                remote_file_path = source_normalized + '\\' + rel_file
+                local_file_path = os.path.join(dest, rel_file)
+                
+                # Ensure parent directory exists
+                local_file_dir = os.path.dirname(local_file_path)
+                if local_file_dir:
+                    os.makedirs(local_file_dir, exist_ok=True)
+                
+                if verbose:
+                    print(f"[*] Downloading {target_ip}:{remote_file_path} to {local_file_path}...")
+                
+                with Client(
+                    target_ip,
+                    username=auth_username,
+                    password=password,
+                    port=5985,
+                    ssl=False,
+                    auth="ntlm",
+                    encryption="auto",
+                    connection_timeout=30,
+                    read_timeout=30,
+                ) as client:
+                    client.fetch(remote_file_path, local_file_path)
+                
+                file_size = os.path.getsize(local_file_path)
+                total_files += 1
+                total_bytes += file_size
+                
+                if status_callback:
+                    status_callback(f"Downloading {total_files}/{total_file_count} files...")
+            
+            if verbose:
+                print(f"[+] Directory downloaded successfully: {total_files} files, {total_bytes} bytes")
+            
+            return f"Downloaded {total_files} file(s) ({total_bytes} bytes) from {target_ip}:{source_normalized}"
+    
+    except Exception as e:
+        error_str = str(e).lower()
+        
+        # Check if this is a file/path access error (not an auth error)
+        if "failed to fetch file" in error_str or "access to the path" in error_str:
+            if verbose:
+                print(f"[!] WinRM download failed: {e}")
+            raise
+        
+        # Check if the exception indicates an authentication failure.
+        if any(auth_err in error_str for auth_err in [
+            "failed to authenticate", "unauthorized", "401", "logon_failure",
+            "invalid credentials", "credentials were rejected"
+        ]):
+            if verbose:
+                print(f"[!] WinRM authentication failed: {e}")
+            raise WinRMAuthenticationError(f"Authentication failed for {username}@{target_ip}: {e}")
+        
+        # Check if the exception indicates a connection failure.
+        if any(conn_err in error_str for conn_err in [
+            "connection", "timeout", "refused", "unreachable", "reset"
+        ]):
+            if verbose:
+                print(f"[!] WinRM connection failed: {e}")
+            raise WinRMConnectionError(f"Connection failed to {target_ip}: {e}")
+        
+        # For any other exception, log it in verbose mode and re-raise.
+        if verbose:
+            print(f"[!] WinRM download failed: {e}")
         raise

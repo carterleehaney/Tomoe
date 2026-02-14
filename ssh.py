@@ -270,6 +270,245 @@ def run_ssh(target_ip, username, password, domain="", script_path=None, command=
         client.close()
 
 
+def _sftp_isdir(sftp, path):
+    """Check if a remote path is a directory via SFTP stat."""
+    import stat
+    try:
+        return stat.S_ISDIR(sftp.stat(path).st_mode)
+    except IOError:
+        return False
+
+
+def _sftp_walk(sftp, remote_dir, sep="/"):
+    """
+    Recursively walk a remote directory tree via SFTP, similar to os.walk.
+    
+    Yields (dirpath, dirnames, filenames) tuples for each directory in the tree.
+    
+    Args:
+        sftp: An open paramiko SFTPClient instance.
+        remote_dir: The remote directory path to walk.
+        sep: Path separator for the remote OS ("/" for Linux, "\\" for Windows).
+    """
+    import stat as stat_module
+    try:
+        entries = sftp.listdir_attr(remote_dir)
+    except IOError:
+        return
+    
+    dirs = []
+    files = []
+    for entry in entries:
+        if stat_module.S_ISDIR(entry.st_mode):
+            dirs.append(entry.filename)
+        else:
+            files.append(entry.filename)
+    
+    yield remote_dir, dirs, files
+    
+    for d in dirs:
+        child_path = remote_dir.rstrip(sep) + sep + d
+        yield from _sftp_walk(sftp, child_path, sep)
+
+
+def run_ssh_download(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None, target_os="windows"):
+    """
+    Download a file or directory from a remote host to the local system using SSH/SFTP.
+    
+    This function uses paramiko to establish an SSH connection and download
+    files via SFTP. It supports both single file downloads and recursive
+    directory downloads. Path handling adapts to the target OS.
+    
+    Args:
+        target_ip: The IP address or hostname of the remote machine.
+        username: The username for authentication.
+        password: The password for authentication.
+        domain: Optional domain name for domain-joined authentication (Windows only).
+        source: Remote source path (Windows: "C:\\Temp\\file.exe", Linux: "/tmp/file").
+        dest: Path to the local destination file or directory.
+        verbose: If True, print detailed status messages during execution.
+        status_callback: Optional callable(message) to report execution progress.
+        target_os: The remote host OS, either "windows" or "linux" (default "windows").
+    
+    Returns:
+        A string containing a success message with files/bytes transferred.
+    
+    Raises:
+        SSHConnectionError: If the connection to the target host fails.
+        SSHAuthenticationError: If authentication fails due to invalid credentials.
+        FileNotFoundError: If the remote source path does not exist.
+    """
+    
+    is_linux = target_os == "linux"
+    sep = "/" if is_linux else "\\"
+    
+    # Perform a quick connectivity check before attempting SSH.
+    if not check_port_open(target_ip, 22, timeout=5):
+        raise SSHConnectionError(f"Port 22 not reachable on {target_ip}")
+    
+    # Construct the authentication username.
+    if domain and not is_linux:
+        auth_username = f"{domain}\\{username}"
+    else:
+        auth_username = username
+    
+    client = _create_ssh_client(target_ip, auth_username, password, verbose)
+    
+    try:
+        sftp = client.open_sftp()
+        
+        try:
+            # Check if the remote source exists and determine if it's a file or directory.
+            if status_callback:
+                status_callback("Checking remote path...")
+            
+            try:
+                remote_stat = sftp.stat(source)
+            except IOError:
+                raise FileNotFoundError(f"Remote path not found: {source}")
+            
+            import stat as stat_module
+            is_directory = stat_module.S_ISDIR(remote_stat.st_mode)
+            
+            if not is_directory:
+                # Single file download.
+                if status_callback:
+                    status_callback("Downloading 0/1 files...")
+                
+                # If dest is an existing directory, append the source filename.
+                if os.path.isdir(dest):
+                    if is_linux:
+                        filename = source.rsplit('/', 1)[-1]
+                    else:
+                        filename = source.rsplit('\\', 1)[-1]
+                    dest = os.path.join(dest, filename)
+                
+                # Ensure local destination directory exists.
+                dest_dir = os.path.dirname(dest)
+                if dest_dir:
+                    os.makedirs(dest_dir, exist_ok=True)
+                
+                if verbose:
+                    print(f"[*] Downloading {target_ip}:{source} to {dest}...")
+                
+                sftp.get(source, dest)
+                
+                file_size = os.path.getsize(dest)
+                
+                if status_callback:
+                    status_callback("Downloading 1/1 files...")
+                
+                if verbose:
+                    print(f"[+] File downloaded successfully: {file_size} bytes")
+                
+                if is_linux:
+                    filename = source.rsplit('/', 1)[-1]
+                else:
+                    filename = source.rsplit('\\', 1)[-1]
+                
+                return f"Downloaded {filename} ({file_size} bytes) from {target_ip}:{source}"
+            
+            else:
+                # Directory download - recursive.
+                if status_callback:
+                    status_callback("Scanning remote directory...")
+                
+                total_files = 0
+                total_bytes = 0
+                
+                # Ensure local destination directory exists.
+                os.makedirs(dest, exist_ok=True)
+                
+                source_stripped = source.rstrip(sep)
+                
+                def _strip_windows_drive(rel_path, path_sep):
+                    """Strip leading Windows drive (e.g. C:) from relative path so we don't create a literal 'C:' directory locally."""
+                    if not rel_path or not path_sep:
+                        return rel_path
+                    # Match single letter + colon at start (e.g. C: or C:\ or C:/)
+                    if len(rel_path) >= 2 and rel_path[0].isalpha() and rel_path[1] == ':':
+                        rel_path = rel_path[2:].lstrip(path_sep)
+                    return rel_path
+
+                for remote_root, dirs, files in _sftp_walk(sftp, source_stripped, sep):
+                    # Calculate relative path from source.
+                    if remote_root == source_stripped:
+                        rel_path = ""
+                    else:
+                        rel_path = remote_root[len(source_stripped):].lstrip(sep)
+                    # For Windows remotes, don't create a literal "C:" directory locally.
+                    if not is_linux:
+                        rel_path = _strip_windows_drive(rel_path, sep)
+                    # Avoid leading slash so join() doesn't produce an absolute path (e.g. server uses C:/).
+                    rel_path = rel_path.lstrip(sep).lstrip("/")
+                    
+                    # Create local directory.
+                    if rel_path:
+                        local_dir = os.path.join(dest, rel_path.replace(sep, os.sep))
+                    else:
+                        local_dir = dest
+                    os.makedirs(local_dir, exist_ok=True)
+                    
+                    # Download each file.
+                    for filename in files:
+                        remote_file_path = remote_root.rstrip(sep) + sep + filename
+                        local_file_path = os.path.join(local_dir, filename)
+                        
+                        if verbose:
+                            print(f"[*] Downloading {target_ip}:{remote_file_path} to {local_file_path}...")
+                        
+                        sftp.get(remote_file_path, local_file_path)
+                        
+                        file_size = os.path.getsize(local_file_path)
+                        total_files += 1
+                        total_bytes += file_size
+                        
+                        if status_callback:
+                            status_callback(f"Downloaded {total_files} file(s)...")
+                
+                if verbose:
+                    print(f"[+] Directory downloaded successfully: {total_files} files, {total_bytes} bytes")
+                
+                return f"Downloaded {total_files} file(s) ({total_bytes} bytes) from {target_ip}:{source}"
+        
+        finally:
+            sftp.close()
+    
+    except (SSHAuthenticationError, SSHConnectionError, FileNotFoundError):
+        raise
+    except Exception as e:
+        error_str = str(e).lower()
+        
+        # Check if this is a file/path access error.
+        if "no such file" in error_str or "permission denied" in error_str:
+            if verbose:
+                print(f"[!] SSH download failed: {e}")
+            raise
+        
+        # Check if the exception indicates an authentication failure.
+        if any(auth_err in error_str for auth_err in [
+            "authentication", "auth failed", "login failed",
+            "invalid credentials", "access denied", "unauthorized", "rejected"
+        ]):
+            if verbose:
+                print(f"[!] SSH authentication failed: {e}")
+            raise SSHAuthenticationError(f"Authentication failed for {auth_username}@{target_ip}: {e}")
+        
+        # Check if the exception indicates a connection failure.
+        if any(conn_err in error_str for conn_err in [
+            "connection", "timeout", "refused", "unreachable", "reset", "eof"
+        ]):
+            if verbose:
+                print(f"[!] SSH connection failed: {e}")
+            raise SSHConnectionError(f"Connection failed to {target_ip}: {e}")
+        
+        if verbose:
+            print(f"[!] SSH download failed: {e}")
+        raise
+    finally:
+        client.close()
+
+
 def run_ssh_copy(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None, target_os="windows"):
     """
     Copy a local file or directory to a remote host using SSH/SFTP.
