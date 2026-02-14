@@ -706,8 +706,8 @@ def run_ssh_copy(target_ip, username, password, domain="", source="", dest="", v
     except Exception as e:
         error_str = str(e).lower()
         
-        # Check if this is a file/path access error (not an auth error).
-        if "no such file" in error_str or "permission denied" in error_str and "sftp" not in error_str:
+        # Check if this is a file/path access error (not an auth error); exclude SFTP-related errors.
+        if ("no such file" in error_str or "permission denied" in error_str) and "sftp" not in error_str:
             if verbose:
                 print(f"[!] SSH copy failed: {e}")
             raise
