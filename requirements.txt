@@ -1,3 +1,5 @@
-impacket>=0.11.0
+pypsexec>=0.3.0
 pypsrp>=0.8.0
+paramiko>=3.0.0
 rich>=13.0.0
+smbprotocol>=1.16.0

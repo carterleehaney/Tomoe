@@ -4,7 +4,7 @@ Tomoe is a python utility for cross-platform windows administration over multipl
 
 WinRM support is from the [pypsrp](https://pypi.org/project/pypsrp/) project.
 
-SMB (`psexec`) functionality is from the [impacket](https://github.com/fortra/impacket) project.
+SMB (`psexec`) functionality is from the [pypsexec](https://pypi.org/project/pypsexec/) project.
 
 ```PowerShell
 PS C:\Users\carte\Documents\GitHub\Tomoe> py .\tomoe.py winrm -i .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --command "whoami"
