@@ -11,6 +11,8 @@ from typing import Optional
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
+from rich.text import Text
+from rich.panel import Panel
 
 from smb import run_psexec, run_smb_copy, run_smb_download
 from wsman import run_winrm, run_winrm_copy, run_winrm_download
@@ -101,7 +103,7 @@ def create_status_table(host_statuses: dict[str, HostStatus]) -> Table:
     table.add_column("Status", style="bold")
     table.add_column("Username", style="magenta")
     table.add_column("Message", style="dim")
-    
+
     for host, status in host_statuses.items():
         if status.status == "success":
             status_style = "[green]Success[/green]"
@@ -111,15 +113,44 @@ def create_status_table(host_statuses: dict[str, HostStatus]) -> Table:
             status_style = "[yellow]Trying...[/yellow]"
         else:
             status_style = "[dim]Pending[/dim]"
-        
+
         table.add_row(
             status.host,
             status_style,
             status.current_user,
             status.message
         )
-    
+
     return table
+
+
+def create_compact_display(host_statuses: dict[str, HostStatus]) -> Panel:
+    """Create a compact display showing a progress bar and status counts.
+
+    Used when the number of hosts exceeds the terminal height.
+    """
+    total = len(host_statuses)
+    counts = {"success": 0, "failed": 0, "trying": 0, "pending": 0}
+
+    for status in host_statuses.values():
+        counts[status.status] = counts.get(status.status, 0) + 1
+
+    completed = counts["success"] + counts["failed"]
+    bar_width = 30
+    filled = int((completed / total) * bar_width) if total > 0 else 0
+    bar = f"[green]{'█' * filled}[/green][dim]{'░' * (bar_width - filled)}[/dim]"
+
+    summary = (
+        f"  {bar}  [{completed}/{total}]  "
+        f"[green]{counts['success']} success[/green] · "
+        f"[red]{counts['failed']} failed[/red] · "
+        f"[yellow]{counts['trying']} active[/yellow] · "
+        f"[dim]{counts['pending']} pending[/dim]"
+    )
+
+    from rich.console import Group
+    content = Group(Text(""), Text.from_markup(summary), Text(""))
+    return Panel(content, title="Tomoe", border_style="bold")
 
 
 def execute_on_host(
@@ -385,43 +416,89 @@ def run_concurrent_execution(
     download: bool = False,
     shell_type: str = "powershell",
     encrypt: bool = True
-) -> list[HostResult]:
-    """Run execution concurrently across all hosts with live status display."""
-    
+) -> tuple[list[HostResult], bool]:
+    """Run execution concurrently across all hosts with live status display.
+
+    Returns a tuple of (results, compact_mode) so callers know which display
+    mode was used.
+    """
+
     console = Console()
     status_lock = Lock()
     stop_event = Event()
-    
+
+    # Determine display mode: compact when hosts exceed terminal height.
+    # Table overhead: title + header + top/mid/bottom borders + padding ~ 7 lines.
+    TABLE_OVERHEAD = 7
+    terminal_height = console.size.height
+    compact_mode = (len(hosts) + TABLE_OVERHEAD) > terminal_height
+
     # Initialize status for all hosts.
     host_statuses: dict[str, HostStatus] = {
         host: HostStatus(host=host, status="pending", message="Waiting...")
         for host in hosts
     }
-    
+
     results: list[HostResult] = []
-    
+
+    def make_display():
+        """Create the appropriate display based on mode."""
+        if compact_mode:
+            return create_compact_display(host_statuses)
+        return create_status_table(host_statuses)
+
     def update_display(live: Live):
         """Background thread to continuously update the display."""
         while not stop_event.is_set():
             with status_lock:
-                live.update(create_status_table(host_statuses))
+                live.update(make_display())
             time.sleep(0.25)
-    
-    with Live(create_status_table(host_statuses), console=console, refresh_per_second=4) as live:
+
+    first_log = [True]  # Mutable so the closure can modify it.
+
+    def log_completion(live: Live, result: HostResult):
+        """In compact mode, print completed hosts above the live display.
+
+        Only successes are shown by default; failures require --verbose.
+        """
+        if not compact_mode:
+            return
+
+        should_print = result.success or verbose
+        if not should_print:
+            return
+
+        # Print a blank line before the first logged host.
+        if first_log[0]:
+            live.console.print()
+            first_log[0] = False
+
+        if result.success:
+            live.console.print(
+                f"  [green]✓[/green] [cyan]{result.host}[/cyan] "
+                f"[dim](user: {result.username})[/dim]"
+            )
+        else:
+            live.console.print(
+                f"  [red]✗[/red] [cyan]{result.host}[/cyan] "
+                f"[dim]{result.message[:60]}[/dim]"
+            )
+
+    with Live(make_display(), console=console, refresh_per_second=4) as live:
         # Start background display updater.
         display_thread = Thread(target=update_display, args=(live,), daemon=True)
         display_thread.start()
-        
+
         try:
             with ThreadPoolExecutor(max_workers=min(max_workers, len(hosts))) as executor:
                 # For multi-host downloads, create per-host subdirectories
                 # to prevent files from overwriting each other.
                 use_host_subdirs = download and source and dest and len(hosts) > 1
-                
+
                 if use_host_subdirs:
                     for host in hosts:
                         os.makedirs(os.path.join(dest, host), exist_ok=True)
-                
+
                 # Submit all host tasks.
                 future_to_host = {
                     executor.submit(
@@ -446,7 +523,7 @@ def run_concurrent_execution(
                     ): host
                     for host in hosts
                 }
-                
+
                 # Wait for all futures with polling to allow keyboard interrupt.
                 pending = set(future_to_host.keys())
                 while pending:
@@ -456,6 +533,7 @@ def run_concurrent_execution(
                         try:
                             result = future.result()
                             results.append(result)
+                            log_completion(live, result)
                         except Exception as e:
                             # Handle unexpected errors.
                             with status_lock:
@@ -464,24 +542,36 @@ def run_concurrent_execution(
                                     status="failed",
                                     message=f"Unexpected error: {str(e)[:40]}"
                                 )
-                            results.append(HostResult(
+                            error_result = HostResult(
                                 host=host,
                                 success=False,
                                 message=f"Unexpected error: {e}"
-                            ))
+                            )
+                            results.append(error_result)
+                            log_completion(live, error_result)
         finally:
             stop_event.set()
             display_thread.join(timeout=1)
+            # Add spacing between scrolling log and final panel.
+            if compact_mode and not first_log[0]:
+                live.console.print()
             # Final update to show completed states.
-            live.update(create_status_table(host_statuses))
-    
-    return results
+            live.update(make_display())
+
+    return results, compact_mode
 
 
-def print_results(results: list[HostResult], console: Console):
-    """Print final results after execution."""
+def print_results(results: list[HostResult], console: Console,
+                   compact_mode: bool = False, verbose: bool = False):
+    """Print final results after execution.
+
+    In compact mode, failures are hidden from the results unless --verbose is set
+    since they would dominate the output on large host lists.
+    """
     console.print("\nExecution Results\n")
-    
+
+    show_failures = not compact_mode or verbose
+
     for result in results:
         if result.success:
             console.print(f"[green]✓[/green] [cyan]{result.host}[/cyan] - Success (user: {result.username})")
@@ -490,9 +580,9 @@ def print_results(results: list[HostResult], console: Console):
                 for line in result.output.strip().split('\n'):
                     console.print(f"    {line}")
                 console.print()
-        else:
+        elif show_failures:
             console.print(f"[red]✗[/red] [cyan]{result.host}[/cyan] - Failed: {result.message}")
-    
+
     # Summary.
     success_count = sum(1 for r in results if r.success)
     console.print(f"\n[bold]Summary:[/bold] {success_count}/{len(results)} hosts successful")
@@ -615,8 +705,12 @@ if __name__ == "__main__":
             console.print(f"  Note: Per-host subdirectories will be created under {dest}")
     console.print()
 
+    # Determine if compact mode will be used (same logic as run_concurrent_execution).
+    TABLE_OVERHEAD = 7
+    compact_mode = (len(hosts) + TABLE_OVERHEAD) > console.size.height
+
     # Run concurrent execution.
-    results = run_concurrent_execution(
+    results, _ = run_concurrent_execution(
         hosts=hosts,
         usernames=usernames,
         passwords=passwords,
@@ -634,9 +728,9 @@ if __name__ == "__main__":
         shell_type=args.shell,
         encrypt=args.encrypt
     )
-    
+
     # Print final results.
-    print_results(results, console)
+    print_results(results, console, compact_mode=compact_mode, verbose=args.verbose)
     
     # Write output files if output directory specified.
     if args.output:
