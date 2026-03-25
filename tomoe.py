@@ -1,4 +1,5 @@
 import argparse
+import ipaddress
 import logging
 import os
 import time
@@ -35,16 +36,62 @@ class HostStatus:
     message: str = "Waiting..."
 
 
+def expand_target(value: str) -> list[str]:
+    """Expand a single target value into a list of IP addresses.
+
+    Supports CIDR notation (e.g. 192.168.1.0/24) and IP ranges using a dash
+    in the last octet (e.g. 192.168.1.1-50). Plain hostnames and single IPs
+    are returned as-is.
+    """
+    # CIDR notation (e.g. 192.168.1.0/24)
+    if '/' in value:
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+            # For /32 or /128 (single host), just return the address
+            if network.num_addresses <= 1:
+                return [str(network.network_address)]
+            # Return all usable host addresses (excludes network and broadcast)
+            return [str(ip) for ip in network.hosts()]
+        except ValueError:
+            pass  # Not a valid CIDR — treat as literal (could be a path)
+
+    # Dash-range in last octet (e.g. 192.168.1.1-50)
+    if '-' in value:
+        parts = value.rsplit('.', 1)
+        if len(parts) == 2 and '-' in parts[1]:
+            try:
+                prefix = parts[0]
+                start_str, end_str = parts[1].split('-', 1)
+                start, end = int(start_str), int(end_str)
+                if 0 <= start <= 255 and 0 <= end <= 255 and start <= end:
+                    # Validate that the prefix forms a valid base
+                    ipaddress.ip_address(f"{prefix}.{start}")
+                    return [f"{prefix}.{i}" for i in range(start, end + 1)]
+            except (ValueError, IndexError):
+                pass  # Not a valid range — treat as literal
+
+    return [value]
+
+
 def parse_target_or_file(value: str) -> list[str]:
     """Parse argument as file path or literal value.
-    
+
     If the value is a path to an existing file, read each line as a separate entry.
     Otherwise, treat the value as a literal string.
+
+    Each entry is then expanded for CIDR notation or IP ranges.
     """
     if isfile(value):
         with open(value, 'r') as f:
-            return [line.strip() for line in f if line.strip()]
-    return [value]
+            entries = [line.strip() for line in f if line.strip()]
+    else:
+        entries = [value]
+
+    # Expand any CIDR or range notation in each entry
+    result = []
+    for entry in entries:
+        result.extend(expand_target(entry))
+    return result
 
 
 def create_status_table(host_statuses: dict[str, HostStatus]) -> Table:
