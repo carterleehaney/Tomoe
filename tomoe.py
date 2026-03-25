@@ -518,11 +518,11 @@ def write_output_files(results: list[HostResult], output_dir: str, console: Cons
 if __name__ == "__main__":
     # Parse arguments.
     parser = argparse.ArgumentParser(
-        usage="tomoe.py {smb, winrm, ssh} -i <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]",
+        usage="tomoe.py {smb, winrm, ssh} <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]",
         description="Tomoe is a python utility for remote administration over multiple protocols in case of fail-over."
     )
     parser.add_argument("protocol", choices=["smb", "winrm", "ssh"], help="protocol to use for remote administration")
-    parser.add_argument("-i", metavar="IP", required=True, help="target host IP/hostname or path to file with targets (one per line)")
+    parser.add_argument("target", metavar="IP", help="target host IP/hostname or path to file with targets (one per line)")
     parser.add_argument("-d", "--domain", default="", help="domain of selected user")
     parser.add_argument("-u", "--username", required=True, help="username or path to file with usernames (one per line)")
     parser.add_argument("-p", "--password", required=True, help="password or path to file with passwords (one per line)")
@@ -590,13 +590,13 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.CRITICAL)
 
     # Parse targets, usernames, and passwords (file or literal).
-    hosts = parse_target_or_file(args.i)
+    hosts = parse_target_or_file(args.target)
     usernames = parse_target_or_file(args.username)
     passwords = parse_target_or_file(args.password)
     
     # Validate that we have at least one host, username, and password.
     if not hosts:
-        parser.error(f"no hosts found in '{args.i}' (file is empty or contains only whitespace)")
+        parser.error(f"no hosts found in '{args.target}' (file is empty or contains only whitespace)")
     if not usernames:
         parser.error(f"no usernames found in '{args.username}' (file is empty or contains only whitespace)")
     if not passwords:
