@@ -14,6 +14,35 @@ from rich.table import Table
 from rich.text import Text
 from rich.panel import Panel
 
+LOG_STYLE = {
+    logging.DEBUG: "dim",
+    logging.INFO: "dim",
+    logging.WARNING: "yellow",
+    logging.ERROR: "red",
+    logging.CRITICAL: "bold red",
+}
+
+
+class LiveLogHandler(logging.Handler):
+    """Logging handler that routes messages through a Rich Live display.
+
+    This avoids raw stderr writes that would corrupt the Live panel.
+    Messages are printed above the panel via live.console.print().
+    """
+
+    def __init__(self, live: Live):
+        super().__init__()
+        self.live = live
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            style = LOG_STYLE.get(record.levelno, "dim")
+            self.live.console.print(f"  [{style}]{msg}[/{style}]")
+        except Exception:
+            self.handleError(record)
+
+
 from smb import run_psexec, run_smb_copy, run_smb_download
 from wsman import run_winrm, run_winrm_copy, run_winrm_download
 from ssh import run_ssh, run_ssh_copy, run_ssh_download
@@ -415,7 +444,8 @@ def run_concurrent_execution(
     target_os: str = "windows",
     download: bool = False,
     shell_type: str = "powershell",
-    encrypt: bool = True
+    encrypt: bool = True,
+    console: Console | None = None
 ) -> tuple[list[HostResult], bool]:
     """Run execution concurrently across all hosts with live status display.
 
@@ -423,7 +453,8 @@ def run_concurrent_execution(
     mode was used.
     """
 
-    console = Console()
+    if console is None:
+        console = Console()
     status_lock = Lock()
     stop_event = Event()
 
@@ -457,15 +488,8 @@ def run_concurrent_execution(
     first_log = [True]  # Mutable so the closure can modify it.
 
     def log_completion(live: Live, result: HostResult):
-        """In compact mode, print completed hosts above the live display.
-
-        Only successes are shown by default; failures require --verbose.
-        """
+        """In compact mode, print completed hosts above the live display."""
         if not compact_mode:
-            return
-
-        should_print = result.success or verbose
-        if not should_print:
             return
 
         # Print a blank line before the first logged host.
@@ -478,13 +502,23 @@ def run_concurrent_execution(
                 f"  [green]✓[/green] [cyan]{result.host}[/cyan] "
                 f"[dim](user: {result.username})[/dim]"
             )
-        else:
+        elif verbose:
             live.console.print(
                 f"  [red]✗[/red] [cyan]{result.host}[/cyan] "
                 f"[dim]{result.message[:60]}[/dim]"
             )
 
     with Live(make_display(), console=console, refresh_per_second=4) as live:
+        # Route logging through the Live display so log lines appear above
+        # the panel instead of corrupting it.
+        root_logger = logging.getLogger()
+        live_handler = LiveLogHandler(live)
+        live_handler.setLevel(logging.DEBUG)
+        original_handlers = root_logger.handlers[:]
+        for h in original_handlers:
+            root_logger.removeHandler(h)
+        root_logger.addHandler(live_handler)
+
         # Start background display updater.
         display_thread = Thread(target=update_display, args=(live,), daemon=True)
         display_thread.start()
@@ -558,19 +592,21 @@ def run_concurrent_execution(
             # Final update to show completed states.
             live.update(make_display())
 
+            # Restore original log handlers.
+            root_logger.removeHandler(live_handler)
+            for h in original_handlers:
+                root_logger.addHandler(h)
+
     return results, compact_mode
 
 
-def print_results(results: list[HostResult], console: Console,
-                   compact_mode: bool = False, verbose: bool = False):
+def print_results(results: list[HostResult], console: Console):
     """Print final results after execution.
 
-    In compact mode, failures are hidden from the results unless --verbose is set
-    since they would dominate the output on large host lists.
+    Only successes are listed here; failures are already shown during execution
+    (in the live table or compact scrolling log).
     """
     console.print("\nExecution Results\n")
-
-    show_failures = not compact_mode or verbose
 
     for result in results:
         if result.success:
@@ -580,12 +616,14 @@ def print_results(results: list[HostResult], console: Console,
                 for line in result.output.strip().split('\n'):
                     console.print(f"    {line}")
                 console.print()
-        elif show_failures:
-            console.print(f"[red]✗[/red] [cyan]{result.host}[/cyan] - Failed: {result.message}")
 
     # Summary.
     success_count = sum(1 for r in results if r.success)
-    console.print(f"\n[bold]Summary:[/bold] {success_count}/{len(results)} hosts successful")
+    fail_count = len(results) - success_count
+    summary = f"\n[bold]Summary:[/bold] {success_count}/{len(results)} hosts successful"
+    if fail_count > 0:
+        summary += f" ([red]{fail_count} failed[/red])"
+    console.print(summary)
 
 
 def write_output_files(results: list[HostResult], output_dir: str, console: Console):
@@ -705,12 +743,8 @@ if __name__ == "__main__":
             console.print(f"  Note: Per-host subdirectories will be created under {dest}")
     console.print()
 
-    # Determine if compact mode will be used (same logic as run_concurrent_execution).
-    TABLE_OVERHEAD = 7
-    compact_mode = (len(hosts) + TABLE_OVERHEAD) > console.size.height
-
     # Run concurrent execution.
-    results, _ = run_concurrent_execution(
+    results, compact_mode = run_concurrent_execution(
         hosts=hosts,
         usernames=usernames,
         passwords=passwords,
@@ -726,11 +760,12 @@ if __name__ == "__main__":
         target_os=args.target_os,
         download=is_download,
         shell_type=args.shell,
-        encrypt=args.encrypt
+        encrypt=args.encrypt,
+        console=console
     )
 
     # Print final results.
-    print_results(results, console, compact_mode=compact_mode, verbose=args.verbose)
+    print_results(results, console)
     
     # Write output files if output directory specified.
     if args.output:
