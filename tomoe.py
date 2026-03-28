@@ -2,9 +2,9 @@ import argparse
 import ipaddress
 import logging
 import os
+import queue
 import time
 from os.path import isfile, isdir, exists
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from threading import Lock, Thread, Event
 from dataclasses import dataclass
 from typing import Optional
@@ -199,7 +199,8 @@ def execute_on_host(
     target_os: str = "windows",
     download: bool = False,
     shell_type: str = "powershell",
-    encrypt: bool = True
+    encrypt: bool = True,
+    shutdown_event: Optional[Event] = None
 ) -> HostResult:
     """Execute command on a single host, trying credential permutations until success."""
     
@@ -216,6 +217,14 @@ def execute_on_host(
     
     for username in usernames:
         for password in passwords:
+            if shutdown_event and shutdown_event.is_set():
+                update_status("failed", "-", "Interrupted by user.")
+                return HostResult(
+                    host=host,
+                    success=False,
+                    message="Interrupted by user."
+                )
+
             update_status("trying", username, f"Authenticating...")
             
             # Create a status callback that updates the live display with
@@ -299,7 +308,8 @@ def execute_on_host(
                         verbose=verbose,
                         status_callback=status_callback,
                         shell_type=shell_type,
-                        encrypt=encrypt
+                        encrypt=encrypt,
+                        shutdown_event=shutdown_event
                     )
                 elif protocol == "winrm" and source and dest:
                     output = run_winrm_copy(
@@ -395,7 +405,14 @@ def execute_on_host(
                     message="Command executed successfully.",
                     output=output
                 )
-                
+            except KeyboardInterrupt:
+                update_status("failed", username, "Interrupted by user.")
+                return HostResult(
+                    host=host,
+                    success=False,
+                    username=username,
+                    message="Interrupted by user."
+                )
             except Exception as e:
                 error_msg = str(e).lower()
                 # Check if it's an authentication error - try next credential. This might need to include more in the future.
@@ -471,6 +488,8 @@ def run_concurrent_execution(
     }
 
     results: list[HostResult] = []
+    result_queue: queue.Queue[HostResult] = queue.Queue()
+    shutdown_requested = False
 
     def make_display():
         """Create the appropriate display based on mode."""
@@ -524,65 +543,147 @@ def run_concurrent_execution(
         display_thread.start()
 
         try:
-            with ThreadPoolExecutor(max_workers=min(max_workers, len(hosts))) as executor:
-                # For multi-host downloads, create per-host subdirectories
-                # to prevent files from overwriting each other.
-                use_host_subdirs = download and source and dest and len(hosts) > 1
+            # For multi-host downloads, create per-host subdirectories
+            # to prevent files from overwriting each other.
+            use_host_subdirs = download and source and dest and len(hosts) > 1
 
-                if use_host_subdirs:
-                    for host in hosts:
-                        os.makedirs(os.path.join(dest, host), exist_ok=True)
+            if use_host_subdirs:
+                for host in hosts:
+                    os.makedirs(os.path.join(dest, host), exist_ok=True)
 
-                # Submit all host tasks.
-                future_to_host = {
-                    executor.submit(
-                        execute_on_host,
-                        host,
-                        usernames,
-                        passwords,
-                        domain,
-                        protocol,
-                        script_path,
-                        command,
-                        script_args,
-                        verbose,
-                        host_statuses,
-                        status_lock,
-                        source,
-                        os.path.join(dest, host) if use_host_subdirs else dest,
-                        target_os,
-                        download,
-                        shell_type,
-                        encrypt
-                    ): host
-                    for host in hosts
-                }
+            work_queue: queue.Queue[tuple[str, Optional[str]] | None] = queue.Queue()
+            completed_hosts = set()
 
-                # Wait for all futures with polling to allow keyboard interrupt.
-                pending = set(future_to_host.keys())
-                while pending:
-                    done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
-                    for future in done:
-                        host = future_to_host[future]
-                        try:
-                            result = future.result()
-                            results.append(result)
-                            log_completion(live, result)
-                        except Exception as e:
-                            # Handle unexpected errors.
+            for host in hosts:
+                per_host_dest = os.path.join(dest, host) if use_host_subdirs else dest
+                work_queue.put((host, per_host_dest))
+
+            def worker():
+                while True:
+                    item = work_queue.get()
+                    if item is None:
+                        work_queue.task_done()
+                        break
+
+                    host, worker_dest = item
+                    try:
+                        if stop_event.is_set():
                             with status_lock:
+                                if host_statuses[host].status in ("pending", "trying"):
+                                    host_statuses[host] = HostStatus(
+                                        host=host,
+                                        status="failed",
+                                        message="Interrupted by user."
+                                    )
+                            result_queue.put(HostResult(
+                                host=host,
+                                success=False,
+                                message="Interrupted by user."
+                            ))
+                        else:
+                            result = execute_on_host(
+                                host,
+                                usernames,
+                                passwords,
+                                domain,
+                                protocol,
+                                script_path,
+                                command,
+                                script_args,
+                                verbose,
+                                host_statuses,
+                                status_lock,
+                                source,
+                                worker_dest,
+                                target_os,
+                                download,
+                                shell_type,
+                                encrypt,
+                                stop_event
+                            )
+                            result_queue.put(result)
+                    except KeyboardInterrupt:
+                        with status_lock:
+                            host_statuses[host] = HostStatus(
+                                host=host,
+                                status="failed",
+                                message="Interrupted by user."
+                            )
+                        result_queue.put(HostResult(
+                            host=host,
+                            success=False,
+                            message="Interrupted by user."
+                        ))
+                    except Exception as e:
+                        with status_lock:
+                            host_statuses[host] = HostStatus(
+                                host=host,
+                                status="failed",
+                                message=f"Unexpected error: {str(e)[:40]}"
+                            )
+                        result_queue.put(HostResult(
+                            host=host,
+                            success=False,
+                            message=f"Unexpected error: {e}"
+                        ))
+                    finally:
+                        work_queue.task_done()
+
+            worker_count = min(max_workers, len(hosts))
+            workers = []
+            for _ in range(worker_count):
+                thread = Thread(target=worker, daemon=True)
+                thread.start()
+                workers.append(thread)
+
+            while len(completed_hosts) < len(hosts):
+                try:
+                    result = result_queue.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                except KeyboardInterrupt:
+                    shutdown_requested = True
+                    stop_event.set()
+                    with status_lock:
+                        for host in hosts:
+                            current_status = host_statuses[host]
+                            if host not in completed_hosts and current_status.status in ("pending", "trying"):
                                 host_statuses[host] = HostStatus(
                                     host=host,
                                     status="failed",
-                                    message=f"Unexpected error: {str(e)[:40]}"
+                                    current_user=current_status.current_user,
+                                    message="Interrupted by user."
                                 )
-                            error_result = HostResult(
+                    break
+
+                if result.host not in completed_hosts:
+                    results.append(result)
+                    completed_hosts.add(result.host)
+                    log_completion(live, result)
+
+            while True:
+                try:
+                    result = result_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+                if result.host not in completed_hosts:
+                    results.append(result)
+                    completed_hosts.add(result.host)
+                    log_completion(live, result)
+
+            for _ in workers:
+                work_queue.put(None)
+
+            if shutdown_requested:
+                with status_lock:
+                    for host in hosts:
+                        if host not in completed_hosts and host_statuses[host].status == "pending":
+                            host_statuses[host] = HostStatus(
                                 host=host,
-                                success=False,
-                                message=f"Unexpected error: {e}"
+                                status="failed",
+                                message="Interrupted by user."
                             )
-                            results.append(error_result)
-                            log_completion(live, error_result)
         finally:
             stop_event.set()
             display_thread.join(timeout=1)
