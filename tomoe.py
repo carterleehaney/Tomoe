@@ -545,6 +545,12 @@ def run_concurrent_execution(
         live_handler = LiveLogHandler(live)
         live_handler.setLevel(logging.DEBUG)
         original_handlers = root_logger.handlers[:]
+        # Preserve existing log formatting by copying the formatter from
+        # the first original handler, if one is configured.
+        if original_handlers:
+            first_handler = original_handlers[0]
+            if first_handler.formatter is not None:
+                live_handler.setFormatter(first_handler.formatter)
         for h in original_handlers:
             root_logger.removeHandler(h)
         root_logger.addHandler(live_handler)
