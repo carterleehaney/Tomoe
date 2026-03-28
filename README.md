@@ -99,9 +99,11 @@ options:
 Tomoe accepts targets as a positional argument. You can specify:
 
 - **Single IP or hostname** — `192.168.1.100` or `server.example.com`
-- **CIDR notation** — `192.168.1.0/24` (expands to all usable host addresses)
+- **CIDR notation** — `192.168.1.0/24`, `/25`, or `/26` (expands to all usable host addresses)
 - **IP range** — `192.168.1.1-50` (dash notation in the last octet)
 - **File** — path to a file with one target per line (supports CIDR and ranges within the file)
+
+Only `/24`, `/25`, and `/26` IPv4 subnets are accepted for CIDR expansion.
 
 ```PowerShell
 py .\tomoe.py winrm 192.168.56.0/24 -u admin -p password --command "whoami"

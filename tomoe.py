@@ -71,20 +71,21 @@ class HostStatus:
 def expand_target(value: str) -> list[str]:
     """Expand a single target value into a list of IP addresses.
 
-    Supports CIDR notation (e.g. 192.168.1.0/24) and IP ranges using a dash
-    in the last octet (e.g. 192.168.1.1-50). Plain hostnames and single IPs
-    are returned as-is.
+    Supports CIDR notation down to /26 (e.g. 192.168.1.0/24) and IP ranges
+    using a dash in the last octet (e.g. 192.168.1.1-50). Plain hostnames and
+    single IPs are returned as-is.
     """
-    # CIDR notation (e.g. 192.168.1.0/24)
+    # CIDR notation is restricted to /24, /25, and /26 IPv4 networks.
     if '/' in value:
         try:
             network = ipaddress.ip_network(value, strict=False)
-            # For /32 or /128 (single host), just return the address
-            if network.num_addresses <= 1:
-                return [str(network.network_address)]
+            if network.version != 4 or network.prefixlen not in {24, 25, 26}:
+                raise ValueError(f"only /24, /25, and /26 IPv4 subnets are supported: {value}")
             # Return all usable host addresses (excludes network and broadcast)
             return [str(ip) for ip in network.hosts()]
-        except ValueError:
+        except ValueError as exc:
+            if "only /24, /25, and /26 IPv4 subnets are supported" in str(exc):
+                raise
             pass  # Not a valid CIDR — treat as literal (could be a path)
 
     # Dash-range in last octet (e.g. 192.168.1.1-50)
@@ -105,13 +106,13 @@ def expand_target(value: str) -> list[str]:
     return [value]
 
 
-def parse_target_or_file(value: str) -> list[str]:
+def parse_target_or_file(value: str, expand_entries: bool = True) -> list[str]:
     """Parse argument as file path or literal value.
 
     If the value is a path to an existing file, read each line as a separate entry.
     Otherwise, treat the value as a literal string.
 
-    Each entry is then expanded for CIDR notation or IP ranges.
+    Target entries can optionally be expanded for CIDR notation or IP ranges.
     """
     if isfile(value):
         with open(value, 'r') as f:
@@ -119,7 +120,10 @@ def parse_target_or_file(value: str) -> list[str]:
     else:
         entries = [value]
 
-    # Expand any CIDR or range notation in each entry
+    if not expand_entries:
+        return entries
+
+    # Expand any CIDR or range notation in each entry.
     result = []
     for entry in entries:
         result.extend(expand_target(entry))
@@ -829,9 +833,13 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.CRITICAL)
 
     # Parse targets, usernames, and passwords (file or literal).
-    hosts = parse_target_or_file(args.target)
-    usernames = parse_target_or_file(args.username)
-    passwords = parse_target_or_file(args.password)
+    try:
+        hosts = parse_target_or_file(args.target)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    usernames = parse_target_or_file(args.username, expand_entries=False)
+    passwords = parse_target_or_file(args.password, expand_entries=False)
     
     # Validate that we have at least one host, username, and password.
     if not hosts:
