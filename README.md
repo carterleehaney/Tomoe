@@ -86,6 +86,7 @@ options:
                         shell type for SMB protocol (default: powershell)
   --no-encrypt          disable SMB encryption (encryption is enabled by default)
   -v, --verbose         show verbose status messages
+  --show-failures       show failed hosts in the compact-mode completion log
   -t, --threads THREADS
                         maximum concurrent threads (default: 10)
   -o, --output DIR      output directory to create for per-host result files
@@ -197,5 +198,8 @@ For SSH on Linux targets, use `--os linux` and remote paths as on the server (e.
 
 Use `-o DIR` to write each host's command or script output to a file under `DIR` (e.g. `DIR\<host>.txt`).
 
-<img width="1406" height="791" alt="image" src="https://github.com/user-attachments/assets/47e15031-5cd7-4ac7-b4af-3bcb40e060ec" />
+#### Compact Mode Failures
 
+When Tomoe switches to compact mode because the host list is taller than the terminal, failed hosts are only shown in the scrolling completion log when verbose output is enabled. Use `--show-failures` to surface those failures there without enabling full verbose status logging.
+
+<img width="1406" height="791" alt="image" src="https://github.com/user-attachments/assets/47e15031-5cd7-4ac7-b4af-3bcb40e060ec" />

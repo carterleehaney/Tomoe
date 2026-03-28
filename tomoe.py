@@ -4,11 +4,12 @@ import logging
 import os
 import queue
 import time
+from collections import deque
 from os.path import isfile, isdir, exists
 from threading import Lock, Thread, Event
 from dataclasses import dataclass
 from typing import Optional
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
@@ -153,7 +154,10 @@ def create_status_table(host_statuses: dict[str, HostStatus]) -> Table:
     return table
 
 
-def create_compact_display(host_statuses: dict[str, HostStatus]) -> Panel:
+def create_compact_display(
+    host_statuses: dict[str, HostStatus],
+    recent_completions: list[Text] | None = None
+):
     """Create a compact display showing a progress bar and status counts.
 
     Used when the number of hosts exceeds the terminal height.
@@ -177,9 +181,16 @@ def create_compact_display(host_statuses: dict[str, HostStatus]) -> Panel:
         f"[dim]{counts['pending']} pending[/dim]"
     )
 
-    from rich.console import Group
-    content = Group(Text(""), Text.from_markup(summary), Text(""))
-    return Panel(content, title="Tomoe", border_style="bold")
+    panel = Panel(
+        Group(Text(""), Text.from_markup(summary), Text("")),
+        title="Tomoe",
+        border_style="bold"
+    )
+
+    if recent_completions:
+        return Group(*recent_completions, panel)
+
+    return panel
 
 
 def execute_on_host(
@@ -462,7 +473,8 @@ def run_concurrent_execution(
     download: bool = False,
     shell_type: str = "powershell",
     encrypt: bool = True,
-    console: Console | None = None
+    console: Console | None = None,
+    show_failures: bool = False
 ) -> tuple[list[HostResult], bool]:
     """Run execution concurrently across all hosts with live status display.
 
@@ -486,6 +498,7 @@ def run_concurrent_execution(
         host: HostStatus(host=host, status="pending", message="Waiting...")
         for host in hosts
     }
+    recent_completions: deque[Text] = deque(maxlen=8)
 
     results: list[HostResult] = []
     result_queue: queue.Queue[HostResult] = queue.Queue()
@@ -494,7 +507,7 @@ def run_concurrent_execution(
     def make_display():
         """Create the appropriate display based on mode."""
         if compact_mode:
-            return create_compact_display(host_statuses)
+            return create_compact_display(host_statuses, list(recent_completions))
         return create_status_table(host_statuses)
 
     def update_display(live: Live):
@@ -504,27 +517,24 @@ def run_concurrent_execution(
                 live.update(make_display())
             time.sleep(0.25)
 
-    first_log = [True]  # Mutable so the closure can modify it.
-
     def log_completion(live: Live, result: HostResult):
-        """In compact mode, print completed hosts above the live display."""
+        """Track completed hosts in compact mode without printing outside Live."""
         if not compact_mode:
             return
 
-        # Print a blank line before the first logged host.
-        if first_log[0]:
-            live.console.print()
-            first_log[0] = False
-
         if result.success:
-            live.console.print(
-                f"  [green]✓[/green] [cyan]{result.host}[/cyan] "
-                f"[dim](user: {result.username})[/dim]"
+            recent_completions.append(
+                Text.from_markup(
+                    f"  [green]✓[/green] [cyan]{result.host}[/cyan] "
+                    f"[dim](user: {result.username})[/dim]"
+                )
             )
-        elif verbose:
-            live.console.print(
-                f"  [red]✗[/red] [cyan]{result.host}[/cyan] "
-                f"[dim]{result.message[:60]}[/dim]"
+        elif verbose or show_failures:
+            recent_completions.append(
+                Text.from_markup(
+                    f"  [red]✗[/red] [cyan]{result.host}[/cyan] "
+                    f"[dim]{result.message[:60]}[/dim]"
+                )
             )
 
     with Live(make_display(), console=console, refresh_per_second=4) as live:
@@ -687,10 +697,7 @@ def run_concurrent_execution(
         finally:
             stop_event.set()
             display_thread.join(timeout=1)
-            # Add spacing between scrolling log and final panel.
-            if compact_mode and not first_log[0]:
-                live.console.print()
-            # Final update to show completed states.
+            # Final update to show completed states before Live exits.
             live.update(make_display())
 
             # Restore original log handlers.
@@ -774,6 +781,7 @@ if __name__ == "__main__":
     parser.add_argument("--shell", choices=["powershell", "cmd"], default="powershell", help="shell type for SMB protocol (default: powershell)")
     parser.add_argument("--no-encrypt", dest="encrypt", action="store_false", default=True, help="disable SMB encryption (encryption is enabled by default)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
+    parser.add_argument("--show-failures", action="store_true", help="show failed hosts in the compact-mode completion log")
     parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
     parser.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
 
@@ -862,7 +870,8 @@ if __name__ == "__main__":
         download=is_download,
         shell_type=args.shell,
         encrypt=args.encrypt,
-        console=console
+        console=console,
+        show_failures=args.show_failures
     )
 
     # Print final results.
