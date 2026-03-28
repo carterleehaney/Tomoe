@@ -98,7 +98,7 @@ def _copy_file_chunked(source_file, dest_file, chunk_size=DEFAULT_CHUNK_SIZE):
         dest_file.write(chunk)
 
 
-def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None, shell_type="powershell", encrypt=True):
+def run_psexec(target_ip, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None, shell_type="powershell", encrypt=True, shutdown_event=None):
     """
     Execute a script or command on a remote Windows host using SMB/psexec.
     
@@ -148,8 +148,82 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         auth_username = username
     
     script_name = None
-    smb_conn = None
-    
+    execution_done = Event()
+    cleanup_started = Event()
+
+    def start_cleanup():
+        """Best-effort cleanup that can be triggered during shutdown."""
+        if cleanup_started.is_set():
+            return
+
+        cleanup_started.set()
+
+        if status_callback and shutdown_event and shutdown_event.is_set():
+            status_callback("Shutdown requested, starting SMB cleanup...")
+
+        try:
+            if 'client' in locals():
+                try:
+                    client.remove_service()
+                except Exception:
+                    pass
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
+
+            if 'script_name' in locals() and 'share' in locals() and 'remote_path' in locals():
+                try:
+                    script_unc_path = _make_unc_path(target_ip, share, remote_path)
+                    smb_remove(script_unc_path)
+                    if verbose:
+                        print(f"[*] Cleaned up script file: {share}\\{remote_path}")
+                except Exception:
+                    pass
+
+            if 'script_path' in locals():
+                try:
+                    smbclient.delete_session(target_ip)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def run_remote_command(executable, arguments):
+        execution_result = {}
+        execution_done.clear()
+
+        def execute_remote():
+            try:
+                stdout, stderr, rc = client.run_executable(
+                    executable=executable,
+                    arguments=arguments
+                )
+                execution_result["stdout"] = stdout
+                execution_result["stderr"] = stderr
+                execution_result["rc"] = rc
+            except Exception as exc:
+                execution_result["exception"] = exc
+            finally:
+                execution_done.set()
+
+        execution_thread = Thread(target=execute_remote, daemon=True)
+        execution_thread.start()
+
+        while not execution_done.wait(timeout=0.25):
+            if shutdown_event and shutdown_event.is_set():
+                start_cleanup()
+                raise KeyboardInterrupt(f"Interrupted by user while executing on {target_ip}")
+
+        if "exception" in execution_result:
+            raise execution_result["exception"]
+
+        return (
+            execution_result["stdout"],
+            execution_result["stderr"],
+            execution_result["rc"]
+        )
+
     try:
         # Create a pypsexec Client for remote execution
         # The Client class handles service installation, execution, and cleanup
@@ -288,10 +362,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
             status_callback("Executing...")
         
         # Execute the command and capture output
-        stdout, stderr, rc = client.run_executable(
-            executable=executable,
-            arguments=arguments
-        )
+        stdout, stderr, rc = run_remote_command(executable, arguments)
         
         # Decode initial output to check for path errors
         temp_stdout = stdout.decode('utf-8', errors='replace') if stdout else ""
@@ -311,17 +382,13 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
                 print(f"[*] Retry arguments: {arguments}")
                 
             # Retry execution
-            stdout, stderr, rc = client.run_executable(
-                executable=executable,
-                arguments=arguments
-            )
+            stdout, stderr, rc = run_remote_command(executable, arguments)
         
         if verbose:
             print(f"[+] Command executed with return code: {rc}")
         
         # Cleanup: remove the service and disconnect
-        client.remove_service()
-        client.disconnect()
+        start_cleanup()
         
         # Decode output streams
         stdout_text = stdout.decode('utf-8', errors='replace').strip() if stdout else ""
@@ -364,35 +431,7 @@ def run_psexec(target_ip, username, password, domain="", script_path=None, comma
         raise
     finally:
         # Ensure cleanup happens even if an error occurs
-        try:
-            if 'client' in locals():
-                try:
-                    client.remove_service()
-                except Exception:
-                    pass
-                try:
-                    client.disconnect()
-                except Exception:
-                    pass
-            
-            # Clean up uploaded script file BEFORE deleting the session
-            if 'script_name' in locals() and 'share' in locals() and 'remote_path' in locals():
-                try:
-                    script_unc_path = _make_unc_path(target_ip, share, remote_path)
-                    smb_remove(script_unc_path)
-                    if verbose:
-                        print(f"[*] Cleaned up script file: {share}\\{remote_path}")
-                except Exception:
-                    pass
-            
-            # Clean up SMB session after removing the file
-            if 'script_path' in locals():
-                try:
-                    smbclient.delete_session(target_ip)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        start_cleanup()
 
 
 @contextmanager
