@@ -709,28 +709,30 @@ def run_concurrent_execution(
 
 
 def print_results(results: list[HostResult], console: Console):
-    """Print final results after execution.
-
-    Only successes are listed here; failures are already shown during execution
-    (in the live table or compact scrolling log).
-    """
+    """Print final results after execution."""
     console.print("\nExecution Results\n")
 
-    for result in results:
-        if result.success:
-            console.print(f"[green]✓[/green] [cyan]{result.host}[/cyan] - Success (user: {result.username})")
-            if result.output:
-                console.print(f"  [dim]Output:[/dim]")
-                for line in result.output.strip().split('\n'):
-                    console.print(f"    {line}")
-                console.print()
+    successes = [r for r in results if r.success]
+    failures = [r for r in results if not r.success]
+
+    if failures:
+        console.print(f"[red]Failed ({len(failures)}):[/red]")
+        for result in failures:
+            console.print(f"  [red]✗[/red] [cyan]{result.host}[/cyan] [dim]{result.message}[/dim]")
+        console.print()
+
+    for result in successes:
+        console.print(f"[green]✓[/green] [cyan]{result.host}[/cyan] - Success (user: {result.username})")
+        if result.output:
+            console.print(f"  [dim]Output:[/dim]")
+            for line in result.output.strip().split('\n'):
+                console.print(f"    {line}")
+            console.print()
 
     # Summary.
-    success_count = sum(1 for r in results if r.success)
-    fail_count = len(results) - success_count
-    summary = f"\n[bold]Summary:[/bold] {success_count}/{len(results)} hosts successful"
-    if fail_count > 0:
-        summary += f" ([red]{fail_count} failed[/red])"
+    summary = f"\n[bold]Summary:[/bold] {len(successes)}/{len(results)} hosts successful"
+    if failures:
+        summary += f" ([red]{len(failures)} failed[/red])"
     console.print(summary)
 
 
