@@ -39,7 +39,8 @@ class LiveLogHandler(logging.Handler):
         try:
             msg = self.format(record)
             style = LOG_STYLE.get(record.levelno, "dim")
-            self.live.console.print(f"  [{style}]{msg}[/{style}]")
+            text = Text(f"  {msg}", style=style)
+            self.live.console.print(text)
         except Exception:
             self.handleError(record)
 
