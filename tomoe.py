@@ -79,16 +79,11 @@ def expand_target(value: str) -> list[str]:
     """
     # CIDR notation is restricted to /24, /25, and /26 IPv4 networks.
     if '/' in value:
-        try:
-            network = ipaddress.ip_network(value, strict=False)
-            if network.version != 4 or network.prefixlen not in {24, 25, 26}:
-                raise ValueError(f"only /24, /25, and /26 IPv4 subnets are supported: {value}")
-            # Return all usable host addresses (excludes network and broadcast)
-            return [str(ip) for ip in network.hosts()]
-        except ValueError as exc:
-            if "only /24, /25, and /26 IPv4 subnets are supported" in str(exc):
-                raise
-            pass  # Not a valid CIDR — treat as literal (could be a path)
+        network = ipaddress.ip_network(value, strict=False)
+        if network.version != 4 or network.prefixlen not in {24, 25, 26}:
+            raise ValueError(f"only /24, /25, and /26 IPv4 subnets are supported: {value}")
+        # Return all usable host addresses (excludes network and broadcast)
+        return [str(ip) for ip in network.hosts()]
 
     # Dash-range in last octet (e.g. 192.168.1.1-50)
     if '-' in value:
