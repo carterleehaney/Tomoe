@@ -14,6 +14,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 from rich.panel import Panel
+from rich.markup import escape
 
 LOG_STYLE = {
     logging.DEBUG: "dim",
@@ -150,10 +151,10 @@ def create_status_table(host_statuses: dict[str, HostStatus]) -> Table:
             status_style = "[dim]Pending[/dim]"
 
         table.add_row(
-            status.host,
+            escape(status.host),
             status_style,
-            status.current_user,
-            status.message
+            escape(str(status.current_user)),
+            escape(str(status.message))
         )
 
     return table
@@ -530,15 +531,15 @@ def run_concurrent_execution(
         if result.success:
             recent_completions.append(
                 Text.from_markup(
-                    f"  [green]✓[/green] [cyan]{result.host}[/cyan] "
-                    f"[dim](user: {result.username})[/dim]"
+                    f"  [green]✓[/green] [cyan]{escape(result.host)}[/cyan] "
+                    f"[dim](user: {escape(str(result.username))})[/dim]"
                 )
             )
         elif verbose or show_failures:
             recent_completions.append(
                 Text.from_markup(
-                    f"  [red]✗[/red] [cyan]{result.host}[/cyan] "
-                    f"[dim]{result.message[:60]}[/dim]"
+                    f"  [red]✗[/red] [cyan]{escape(result.host)}[/cyan] "
+                    f"[dim]{escape(str(result.message)[:60])}[/dim]"
                 )
             )
 
@@ -729,11 +730,11 @@ def print_results(results: list[HostResult], console: Console):
     if failures:
         console.print(f"[red]Failed ({len(failures)}):[/red]")
         for result in failures:
-            console.print(f"  [red]✗[/red] [cyan]{result.host}[/cyan] [dim]{result.message}[/dim]")
+            console.print(f"  [red]✗[/red] [cyan]{escape(result.host)}[/cyan] [dim]{escape(str(result.message))}[/dim]")
         console.print()
 
     for result in successes:
-        console.print(f"[green]✓[/green] [cyan]{result.host}[/cyan] - Success (user: {result.username})")
+        console.print(f"[green]✓[/green] [cyan]{escape(result.host)}[/cyan] - Success (user: {escape(str(result.username))})")
         if result.output:
             console.print(f"  [dim]Output:[/dim]")
             for line in result.output.strip().split('\n'):
