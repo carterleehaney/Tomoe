@@ -52,6 +52,8 @@ Summary: 5/5 hosts successful
 
 ## Usage
 
+Requires **Python 3.10 or higher**.
+
 Ensure you have all requirements installed.
 
 `pip install -r requirements.txt`
@@ -59,13 +61,13 @@ Ensure you have all requirements installed.
 ```PowerShell
 py tomoe.py -h
 
-usage: tomoe.py {smb, winrm, ssh} <target> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]
+usage: tomoe.py {smb, winrm, ssh} <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]
 
 Tomoe is a python utility for remote administration over multiple protocols in case of fail-over.
 
 positional arguments:
   {smb,winrm,ssh}       protocol to use for remote administration
-  IP                    target host IP/hostname, CIDR range, IP range, or path to file with targets (one per line)
+  IP                    target host IP/hostname or path to file with targets (one per line)
 
 options:
   -h, --help            show this help message and exit
