@@ -1,15 +1,50 @@
 import argparse
+import ipaddress
 import logging
 import os
 import queue
 import time
+from collections import deque
 from os.path import isfile, isdir, exists
 from threading import Lock, Thread, Event
 from dataclasses import dataclass
 from typing import Optional
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
+from rich.text import Text
+from rich.panel import Panel
+from rich.markup import escape
+
+LOG_STYLE = {
+    logging.DEBUG: "dim",
+    logging.INFO: "dim",
+    logging.WARNING: "yellow",
+    logging.ERROR: "red",
+    logging.CRITICAL: "bold red",
+}
+
+
+class LiveLogHandler(logging.Handler):
+    """Logging handler that routes messages through a Rich Live display.
+
+    This avoids raw stderr writes that would corrupt the Live panel.
+    Messages are printed above the panel via live.console.print().
+    """
+
+    def __init__(self, live: Live):
+        super().__init__()
+        self.live = live
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            style = LOG_STYLE.get(record.levelno, "dim")
+            text = Text(f"  {msg}", style=style)
+            self.live.console.print(text)
+        except Exception:
+            self.handleError(record)
+
 
 from smb import run_psexec, run_smb_copy, run_smb_download
 from wsman import run_winrm, run_winrm_copy, run_winrm_download
@@ -35,16 +70,61 @@ class HostStatus:
     message: str = "Waiting..."
 
 
-def parse_target_or_file(value: str) -> list[str]:
+def expand_target(value: str) -> list[str]:
+    """Expand a single target value into a list of IP addresses.
+
+    Supports CIDR notation down to /26 (e.g. 192.168.1.0/24) and IP ranges
+    using a dash in the last octet (e.g. 192.168.1.1-50). Plain hostnames and
+    single IPs are returned as-is.
+    """
+    # CIDR notation is restricted to /24, /25, and /26 IPv4 networks.
+    if '/' in value:
+        network = ipaddress.ip_network(value, strict=False)
+        if network.version != 4 or network.prefixlen not in {24, 25, 26}:
+            raise ValueError(f"only /24, /25, and /26 IPv4 subnets are supported: {value}")
+        # Return all usable host addresses (excludes network and broadcast)
+        return [str(ip) for ip in network.hosts()]
+
+    # Dash-range in last octet (e.g. 192.168.1.1-50)
+    if '-' in value:
+        parts = value.rsplit('.', 1)
+        if len(parts) == 2 and '-' in parts[1]:
+            try:
+                prefix = parts[0]
+                start_str, end_str = parts[1].split('-', 1)
+                start, end = int(start_str), int(end_str)
+                if 0 <= start <= 255 and 0 <= end <= 255 and start <= end:
+                    # Validate that the prefix forms a valid base
+                    ipaddress.ip_address(f"{prefix}.{start}")
+                    return [f"{prefix}.{i}" for i in range(start, end + 1)]
+            except (ValueError, IndexError):
+                pass  # Not a valid range — treat as literal
+
+    return [value]
+
+
+def parse_target_or_file(value: str, expand_entries: bool = True) -> list[str]:
     """Parse argument as file path or literal value.
-    
+
     If the value is a path to an existing file, read each line as a separate entry.
     Otherwise, treat the value as a literal string.
+
+    Target entries can optionally be expanded for CIDR notation or IP ranges.
     """
     if isfile(value):
         with open(value, 'r') as f:
-            return [line.strip() for line in f if line.strip()]
-    return [value]
+            entries = [line.strip() for line in f if line.strip()]
+    else:
+        entries = [value]
+
+    if not expand_entries:
+        return entries
+
+    # Expand any CIDR or range notation in each entry.
+    result = []
+    for entry in entries:
+        result.extend(expand_target(entry))
+    return result
 
 
 def create_status_table(host_statuses: dict[str, HostStatus]) -> Table:
@@ -54,7 +134,7 @@ def create_status_table(host_statuses: dict[str, HostStatus]) -> Table:
     table.add_column("Status", style="bold")
     table.add_column("Username", style="magenta")
     table.add_column("Message", style="dim")
-    
+
     for host, status in host_statuses.items():
         if status.status == "success":
             status_style = "[green]Success[/green]"
@@ -64,15 +144,54 @@ def create_status_table(host_statuses: dict[str, HostStatus]) -> Table:
             status_style = "[yellow]Trying...[/yellow]"
         else:
             status_style = "[dim]Pending[/dim]"
-        
+
         table.add_row(
-            status.host,
+            escape(status.host),
             status_style,
-            status.current_user,
-            status.message
+            escape(str(status.current_user)),
+            escape(str(status.message))
         )
-    
+
     return table
+
+
+def create_compact_display(
+    host_statuses: dict[str, HostStatus],
+    recent_completions: list[Text] | None = None
+):
+    """Create a compact display showing a progress bar and status counts.
+
+    Used when the number of hosts exceeds the terminal height.
+    """
+    total = len(host_statuses)
+    counts = {"success": 0, "failed": 0, "trying": 0, "pending": 0}
+
+    for status in host_statuses.values():
+        counts[status.status] = counts.get(status.status, 0) + 1
+
+    completed = counts["success"] + counts["failed"]
+    bar_width = 30
+    filled = int((completed / total) * bar_width) if total > 0 else 0
+    bar = f"[green]{'█' * filled}[/green][dim]{'░' * (bar_width - filled)}[/dim]"
+
+    summary = (
+        f"  {bar}  [{completed}/{total}]  "
+        f"[green]{counts['success']} success[/green] · "
+        f"[red]{counts['failed']} failed[/red] · "
+        f"[yellow]{counts['trying']} active[/yellow] · "
+        f"[dim]{counts['pending']} pending[/dim]"
+    )
+
+    panel = Panel(
+        Group(Text(""), Text.from_markup(summary), Text("")),
+        title="Tomoe",
+        border_style="bold"
+    )
+
+    if recent_completions:
+        return Group(*recent_completions, panel)
+
+    return panel
 
 
 def execute_on_host(
@@ -354,36 +473,92 @@ def run_concurrent_execution(
     target_os: str = "windows",
     download: bool = False,
     shell_type: str = "powershell",
-    encrypt: bool = True
-) -> list[HostResult]:
-    """Run execution concurrently across all hosts with live status display."""
-    
-    console = Console()
+    encrypt: bool = True,
+    console: Console | None = None,
+    show_failures: bool = False
+) -> tuple[list[HostResult], bool]:
+    """Run execution concurrently across all hosts with live status display.
+
+    Returns a tuple of (results, compact_mode) so callers know which display
+    mode was used.
+    """
+
+    if console is None:
+        console = Console()
     status_lock = Lock()
     stop_event = Event()
-    
+
+    # Determine display mode: compact when hosts exceed terminal height.
+    # Table overhead: title + header + top/mid/bottom borders + padding ~ 7 lines.
+    TABLE_OVERHEAD = 7
+    terminal_height = console.size.height
+    compact_mode = (len(hosts) + TABLE_OVERHEAD) > terminal_height
+
     # Initialize status for all hosts.
     host_statuses: dict[str, HostStatus] = {
         host: HostStatus(host=host, status="pending", message="Waiting...")
         for host in hosts
     }
-    
+    recent_completions: deque[Text] = deque(maxlen=8)
+
     results: list[HostResult] = []
     result_queue: queue.Queue[HostResult] = queue.Queue()
     shutdown_requested = False
-    
+
+    def make_display():
+        """Create the appropriate display based on mode."""
+        if compact_mode:
+            return create_compact_display(host_statuses, list(recent_completions))
+        return create_status_table(host_statuses)
+
     def update_display(live: Live):
         """Background thread to continuously update the display."""
         while not stop_event.is_set():
             with status_lock:
-                live.update(create_status_table(host_statuses))
+                live.update(make_display())
             time.sleep(0.25)
-    
-    with Live(create_status_table(host_statuses), console=console, refresh_per_second=4) as live:
+
+    def log_completion(live: Live, result: HostResult):
+        """Track completed hosts in compact mode without printing outside Live."""
+        if not compact_mode:
+            return
+
+        if result.success:
+            recent_completions.append(
+                Text.from_markup(
+                    f"  [green]✓[/green] [cyan]{escape(result.host)}[/cyan] "
+                    f"[dim](user: {escape(str(result.username))})[/dim]"
+                )
+            )
+        elif verbose or show_failures:
+            recent_completions.append(
+                Text.from_markup(
+                    f"  [red]✗[/red] [cyan]{escape(result.host)}[/cyan] "
+                    f"[dim]{escape(str(result.message)[:60])}[/dim]"
+                )
+            )
+
+    with Live(make_display(), console=console, refresh_per_second=4) as live:
+        # Route logging through the Live display so log lines appear above
+        # the panel instead of corrupting it.
+        root_logger = logging.getLogger()
+        live_handler = LiveLogHandler(live)
+        live_handler.setLevel(logging.DEBUG)
+        original_handlers = root_logger.handlers[:]
+        # Preserve existing log formatting by copying the formatter from
+        # the first original handler, if one is configured.
+        if original_handlers:
+            first_handler = original_handlers[0]
+            if first_handler.formatter is not None:
+                live_handler.setFormatter(first_handler.formatter)
+        for h in original_handlers:
+            root_logger.removeHandler(h)
+        root_logger.addHandler(live_handler)
+
         # Start background display updater.
         display_thread = Thread(target=update_display, args=(live,), daemon=True)
         display_thread.start()
-        
+
         try:
             # For multi-host downloads, create per-host subdirectories
             # to prevent files from overwriting each other.
@@ -501,6 +676,7 @@ def run_concurrent_execution(
                 if result.host not in completed_hosts:
                     results.append(result)
                     completed_hosts.add(result.host)
+                    log_completion(live, result)
 
             while True:
                 try:
@@ -511,6 +687,7 @@ def run_concurrent_execution(
                 if result.host not in completed_hosts:
                     results.append(result)
                     completed_hosts.add(result.host)
+                    log_completion(live, result)
 
             for _ in workers:
                 work_queue.put(None)
@@ -527,30 +704,43 @@ def run_concurrent_execution(
         finally:
             stop_event.set()
             display_thread.join(timeout=1)
-            # Final update to show completed states.
-            live.update(create_status_table(host_statuses))
+            # Final update to show completed states before Live exits.
+            live.update(make_display())
 
-    return results
+            # Restore original log handlers.
+            root_logger.removeHandler(live_handler)
+            for h in original_handlers:
+                root_logger.addHandler(h)
+
+    return results, compact_mode
 
 
 def print_results(results: list[HostResult], console: Console):
     """Print final results after execution."""
     console.print("\nExecution Results\n")
-    
-    for result in results:
-        if result.success:
-            console.print(f"[green]✓[/green] [cyan]{result.host}[/cyan] - Success (user: {result.username})")
-            if result.output:
-                console.print(f"  [dim]Output:[/dim]")
-                for line in result.output.strip().split('\n'):
-                    console.print(f"    {line}")
-                console.print()
-        else:
-            console.print(f"[red]✗[/red] [cyan]{result.host}[/cyan] - Failed: {result.message}")
-    
+
+    successes = [r for r in results if r.success]
+    failures = [r for r in results if not r.success]
+
+    if failures:
+        console.print(f"[red]Failed ({len(failures)}):[/red]")
+        for result in failures:
+            console.print(f"  [red]✗[/red] [cyan]{escape(result.host)}[/cyan] [dim]{escape(str(result.message))}[/dim]")
+        console.print()
+
+    for result in successes:
+        console.print(f"[green]✓[/green] [cyan]{escape(result.host)}[/cyan] - Success (user: {escape(str(result.username))})")
+        if result.output:
+            console.print(f"  [dim]Output:[/dim]")
+            for line in result.output.strip().split('\n'):
+                console.print(f"    {line}")
+            console.print()
+
     # Summary.
-    success_count = sum(1 for r in results if r.success)
-    console.print(f"\n[bold]Summary:[/bold] {success_count}/{len(results)} hosts successful")
+    summary = f"\n[bold]Summary:[/bold] {len(successes)}/{len(results)} hosts successful"
+    if failures:
+        summary += f" ([red]{len(failures)} failed[/red])"
+    console.print(summary)
 
 
 def write_output_files(results: list[HostResult], output_dir: str, console: Console):
@@ -573,11 +763,11 @@ def write_output_files(results: list[HostResult], output_dir: str, console: Cons
 if __name__ == "__main__":
     # Parse arguments.
     parser = argparse.ArgumentParser(
-        usage="tomoe.py {smb, winrm, ssh} -i <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]",
+        usage="tomoe.py {smb, winrm, ssh} <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]",
         description="Tomoe is a python utility for remote administration over multiple protocols in case of fail-over."
     )
     parser.add_argument("protocol", choices=["smb", "winrm", "ssh"], help="protocol to use for remote administration")
-    parser.add_argument("-i", metavar="IP", required=True, help="target host IP/hostname or path to file with targets (one per line)")
+    parser.add_argument("target", metavar="IP", help="target host IP/hostname or path to file with targets (one per line)")
     parser.add_argument("-d", "--domain", default="", help="domain of selected user")
     parser.add_argument("-u", "--username", required=True, help="username or path to file with usernames (one per line)")
     parser.add_argument("-p", "--password", required=True, help="password or path to file with passwords (one per line)")
@@ -600,6 +790,7 @@ if __name__ == "__main__":
     parser.add_argument("--shell", choices=["powershell", "cmd"], default="powershell", help="shell type for SMB protocol (default: powershell)")
     parser.add_argument("--no-encrypt", dest="encrypt", action="store_false", default=True, help="disable SMB encryption (encryption is enabled by default)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
+    parser.add_argument("--show-failures", action="store_true", help="show failed hosts in the compact-mode completion log")
     parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
     parser.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
 
@@ -645,13 +836,17 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.CRITICAL)
 
     # Parse targets, usernames, and passwords (file or literal).
-    hosts = parse_target_or_file(args.i)
-    usernames = parse_target_or_file(args.username)
-    passwords = parse_target_or_file(args.password)
+    try:
+        hosts = parse_target_or_file(args.target)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    usernames = parse_target_or_file(args.username, expand_entries=False)
+    passwords = parse_target_or_file(args.password, expand_entries=False)
     
     # Validate that we have at least one host, username, and password.
     if not hosts:
-        parser.error(f"no hosts found in '{args.i}' (file is empty or contains only whitespace)")
+        parser.error(f"no hosts found in '{args.target}' (file is empty or contains only whitespace)")
     if not usernames:
         parser.error(f"no usernames found in '{args.username}' (file is empty or contains only whitespace)")
     if not passwords:
@@ -671,7 +866,7 @@ if __name__ == "__main__":
     console.print()
 
     # Run concurrent execution.
-    results = run_concurrent_execution(
+    results, compact_mode = run_concurrent_execution(
         hosts=hosts,
         usernames=usernames,
         passwords=passwords,
@@ -687,9 +882,11 @@ if __name__ == "__main__":
         target_os=args.target_os,
         download=is_download,
         shell_type=args.shell,
-        encrypt=args.encrypt
+        encrypt=args.encrypt,
+        console=console,
+        show_failures=args.show_failures
     )
-    
+
     # Print final results.
     print_results(results, console)
     
