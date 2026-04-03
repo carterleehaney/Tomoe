@@ -202,8 +202,13 @@ For SSH on Linux targets, use `--os linux` and remote paths as on the server (e.
 
 Use `-o DIR` to write each host's command or script output to a file under `DIR` (e.g. `DIR\<host>.txt`).
 
-#### Compact Mode Failures
-
-When Tomoe switches to compact mode because the host list is taller than the terminal, failed hosts are only shown in the scrolling completion log when verbose output is enabled. Use `--show-failures` to surface those failures there without enabling full verbose status logging.
-
 <img width="1406" height="791" alt="image" src="https://github.com/user-attachments/assets/47e15031-5cd7-4ac7-b4af-3bcb40e060ec" />
+
+#### Compact Mode
+
+When Tomoe detects that there are more hosts then would be suitable for your terminal, it enters compact mode. Compact mode will show you successes directly at the bottom of the output, so you can quickly see what succeeded and what results are printed by hosts. 
+
+<img width="1470" height="298" alt="image" src="https://github.com/user-attachments/assets/b64eabc5-3790-4ec9-bd3c-94d2684a0b43" />
+
+<img width="463" height="630" alt="image" src="https://github.com/user-attachments/assets/f8b9ba72-6487-4c89-b1bc-645fc600c9e5" />
+
