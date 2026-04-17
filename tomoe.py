@@ -847,8 +847,8 @@ if __name__ == "__main__":
     if args.password is None:
         if args.protocol != "ssh":
             parser.error(f"-p/--password is required for protocol '{args.protocol}' (only ssh supports key-based auth)")
-        # Empty-string password signals key-based auth to the ssh layer.
-        passwords = [""]
+        # None signals key-based auth to the ssh layer; "" remains a real password value.
+        passwords = [None]
     else:
         passwords = parse_target_or_file(args.password, expand_entries=False)
 
