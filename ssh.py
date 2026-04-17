@@ -45,10 +45,17 @@ def _create_ssh_client(target_ip, auth_username, password, verbose=False):
     """
     Create and return a connected paramiko SSHClient.
     
+    If ``password`` is ``None``, authentication falls back to standard SSH
+    key-based auth: the SSH agent (if running) and the default key files under
+    ``~/.ssh/`` (id_rsa, id_ecdsa, id_ed25519, etc.) are used. Any other value
+    — including an empty string — is treated as an explicit password and only
+    password auth is attempted; no implicit key fallback, because explicit is
+    better than implicit.
+    
     Args:
         target_ip: The IP address or hostname of the remote host.
         auth_username: The username for authentication (may include DOMAIN\\user).
-        password: The password for authentication.
+        password: The password for authentication, or ``None`` to use keys.
         verbose: If True, print detailed status messages.
     
     Returns:
@@ -61,6 +68,15 @@ def _create_ssh_client(target_ip, auth_username, password, verbose=False):
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     
+    # If no password was supplied (sentinel: None), use standard SSH
+    # key-based auth (agent + default key files in ~/.ssh/). An empty
+    # string is still treated as an explicit (if lousy) password.
+    use_key_auth = password is None
+    
+    if verbose:
+        auth_mode = "key-based (agent + ~/.ssh/)" if use_key_auth else "password"
+        print(f"[*] SSH auth mode: {auth_mode} for {auth_username}@{target_ip}")
+    
     try:
         client.connect(
             hostname=target_ip,
@@ -68,8 +84,8 @@ def _create_ssh_client(target_ip, auth_username, password, verbose=False):
             username=auth_username,
             password=password,
             timeout=30,
-            allow_agent=False,
-            look_for_keys=False,
+            allow_agent=use_key_auth,
+            look_for_keys=use_key_auth,
         )
     except paramiko.AuthenticationException as e:
         if verbose:

@@ -770,7 +770,7 @@ if __name__ == "__main__":
     parser.add_argument("target", metavar="IP", help="target host IP/hostname or path to file with targets (one per line)")
     parser.add_argument("-d", "--domain", default="", help="domain of selected user")
     parser.add_argument("-u", "--username", required=True, help="username or path to file with usernames (one per line)")
-    parser.add_argument("-p", "--password", required=True, help="password or path to file with passwords (one per line)")
+    parser.add_argument("-p", "--password", default=None, help="password or path to file with passwords (one per line). Optional for ssh: if omitted, SSH key-based auth is used (agent + ~/.ssh/ keys).")
 
     parser.add_argument("--os", choices=["windows", "linux"], default="windows", dest="target_os",
                         help="target host OS (default: windows). Only applies to SSH protocol.")
@@ -842,8 +842,16 @@ if __name__ == "__main__":
         parser.error(str(exc))
 
     usernames = parse_target_or_file(args.username, expand_entries=False)
-    passwords = parse_target_or_file(args.password, expand_entries=False)
-    
+
+    # Password handling: required for smb/winrm, optional for ssh (key-based auth).
+    if args.password is None:
+        if args.protocol != "ssh":
+            parser.error(f"-p/--password is required for protocol '{args.protocol}' (only ssh supports key-based auth)")
+        # None signals key-based auth to the ssh layer; "" remains a real password value.
+        passwords = [None]
+    else:
+        passwords = parse_target_or_file(args.password, expand_entries=False)
+
     # Validate that we have at least one host, username, and password.
     if not hosts:
         parser.error(f"no hosts found in '{args.target}' (file is empty or contains only whitespace)")
@@ -855,7 +863,10 @@ if __name__ == "__main__":
     console = Console()
     console.print()
     console.print(f"  Targets: {len(hosts)} host(s)")
-    console.print(f"  Credentials: {len(usernames)} user(s) x {len(passwords)} password(s)")
+    if args.password is None and args.protocol == "ssh":
+        console.print(f"  Credentials: {len(usernames)} user(s) x SSH key auth")
+    else:
+        console.print(f"  Credentials: {len(usernames)} user(s) x {len(passwords)} password(s)")
     console.print(f"  Protocol: {args.protocol}")
     if args.upload:
         console.print(f"  Operation: Upload {source} -> {dest}")
