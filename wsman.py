@@ -325,12 +325,25 @@ def _handle_transfer(line, remote_cwd, local_cwd, target_ip, username, password,
         print("Usage: download <remote>")
         return
     remote = args[0]
-    local_name = os.path.basename(remote.replace("\\", "/").rstrip("/")) or "downloaded_file"
+    # run_winrm_download opens its own pypsrp Client, which starts in the
+    # default remote dir (typically C:\Windows\System32) — not the
+    # interactive runspace's current dir. Resolve relative paths against
+    # the prompt's remote_cwd so 'download file.txt' Just Works.
+    remote_normalized = remote.replace("/", "\\")
+    is_absolute = (len(remote_normalized) >= 2 and remote_normalized[1] == ":") or remote_normalized.startswith("\\\\")
+    if is_absolute:
+        remote_resolved = remote
+    else:
+        if not remote_cwd:
+            print("ERROR: remote cwd unknown; pass an absolute path")
+            return
+        remote_resolved = remote_cwd.rstrip("\\") + "\\" + remote_normalized.lstrip("\\")
+    local_name = os.path.basename(remote_resolved.replace("\\", "/").rstrip("/")) or "downloaded_file"
     local_dest = os.path.join(local_cwd, local_name)
     try:
         output = run_winrm_download(
             target_ip=target_ip, username=username, password=password,
-            domain=domain, source=remote, dest=local_dest,
+            domain=domain, source=remote_resolved, dest=local_dest,
             verbose=verbose,
         )
         print(output)
