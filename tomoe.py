@@ -806,56 +806,85 @@ def write_output_files(results: list[HostResult], output_dir: str, console: Cons
     console.print(f"[bold]Output:[/bold] Wrote {written_count} file(s) to {output_dir}/")
 
 
-def main():
-    # Parse arguments.
-    parser = argparse.ArgumentParser(
-        usage="tomoe.py {smb, winrm, ssh} <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]",
-        description="Tomoe is a python utility for remote administration over multiple protocols in case of fail-over."
-    )
-    parser.add_argument("protocol", choices=["smb", "winrm", "ssh"], help="protocol to use for remote administration")
-    parser.add_argument("target", metavar="IP", help="target host IP/hostname or path to file with targets (one per line)")
-    parser.add_argument("-d", "--domain", default="", help="domain of selected user")
-    parser.add_argument("-u", "--username", required=True, help="username or path to file with usernames (one per line)")
-    parser.add_argument("-p", "--password", default=None, help="password or path to file with passwords (one per line). Optional for ssh: if omitted, SSH key-based auth is used (agent + ~/.ssh/ keys).")
+def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level parser with one subparser per protocol.
 
-    parser.add_argument("--os", choices=["windows", "linux"], default="windows", dest="target_os",
-                        help="target host OS (default: windows). Only applies to SSH protocol.")
+    Common options live on a hidden parent parser that each subparser inherits.
+    Protocol-specific flags (--shell/--no-encrypt for smb, -i for winrm, --os for
+    ssh) are registered only on their owning subparser, so argparse rejects them
+    on the wrong protocol at parse time.
+    """
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("target", metavar="IP", help="target host IP/hostname or path to file with targets (one per line)")
+    shared.add_argument("-d", "--domain", default="", help="domain of selected user")
+    shared.add_argument("-u", "--username", required=True, help="username or path to file with usernames (one per line)")
 
-    # Script or Command; but never both.
-    exec_group = parser.add_mutually_exclusive_group(required=False)
-    exec_group.add_argument("-s", "--script", help="local path to script to execute (PowerShell on Windows, bash on Linux)")
-    exec_group.add_argument("-c", "--command", help="command to execute (PowerShell on Windows, shell on Linux)")
-    
-    # File transfer (mutually exclusive: --upload or --download, each takes source + dest).
-    transfer_group = parser.add_mutually_exclusive_group(required=False)
+    exec_group = shared.add_mutually_exclusive_group(required=False)
+    exec_group.add_argument("-s", "--script", help="local path to a script to execute on the remote host")
+    exec_group.add_argument("-c", "--command", help="command to execute on the remote host")
+
+    transfer_group = shared.add_mutually_exclusive_group(required=False)
     transfer_group.add_argument("--upload", nargs=2, metavar=("SOURCE", "DEST"), help="upload local SOURCE to remote DEST")
     transfer_group.add_argument("--download", nargs=2, metavar=("SOURCE", "DEST"), help="download remote SOURCE to local DEST")
-    
-    # Arguments to pass to the script.
-    parser.add_argument("-a", "--args", default="", help="arguments to pass to the script")
-    parser.add_argument("--shell", choices=["powershell", "cmd"], default="powershell", help="shell type for SMB protocol (default: powershell)")
-    parser.add_argument("--no-encrypt", dest="encrypt", action="store_false", default=True, help="disable SMB encryption (encryption is enabled by default)")
-    parser.add_argument("-i", "--interactive", action="store_true", help="drop into an interactive PowerShell session on the remote host (winrm only, single host)")
-    parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
-    parser.add_argument("--show-failures", action="store_true", help="show failed hosts in the compact-mode completion log")
-    parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
-    parser.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
 
+    shared.add_argument("-a", "--args", default="", help="arguments to pass to the script")
+    shared.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
+    shared.add_argument("--show-failures", action="store_true", help="show failed hosts in the compact-mode completion log")
+    shared.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
+    shared.add_argument("-o", "--output", metavar="DIR", help="output directory to create for per-host result files")
+
+    epilog = (
+        "Common options (accepted by every protocol):\n"
+        "  IP                  target host — IP, hostname, CIDR (/24-/26),\n"
+        "                      dash-range (e.g. 10.0.0.1-50), or file with one per line\n"
+        "  -u USERNAME         username or path to file with usernames\n"
+        "  -d DOMAIN           domain of selected user\n"
+        "  -c COMMAND          command to execute        (mutually exclusive with -s)\n"
+        "  -s SCRIPT           local script path         (mutually exclusive with -c)\n"
+        "  --upload SRC DST    upload SRC to remote DST\n"
+        "  --download SRC DST  download remote SRC to local DST\n"
+        "  -a ARGS             arguments to pass to the script\n"
+        "  -t THREADS          maximum concurrent threads (default: 10)\n"
+        "  -o DIR              per-host output directory\n"
+        "  -v                  verbose status messages\n"
+        "  --show-failures     show failed hosts in compact-mode log\n"
+        "\n"
+        "Run 'tomoe {smb,winrm,ssh} -h' for protocol-specific options."
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="tomoe",
+        description="Tomoe is a python utility for remote administration over multiple protocols in case of fail-over.",
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="protocol", required=True, metavar="{smb,winrm,ssh}")
+
+    smb_parser = subparsers.add_parser("smb", parents=[shared], help="SMB/PsExec remote execution (runs as NT AUTHORITY\\SYSTEM)")
+    smb_parser.add_argument("-p", "--password", required=True, help="password or path to file with passwords (one per line)")
+    smb_parser.add_argument("--shell", choices=["powershell", "cmd"], default="powershell", help="shell type for SMB protocol (default: powershell)")
+    smb_parser.add_argument("--no-encrypt", dest="encrypt", action="store_false", default=True, help="disable SMB encryption (encryption is enabled by default)")
+    smb_parser.set_defaults(target_os="windows", interactive=False)
+
+    winrm_parser = subparsers.add_parser("winrm", parents=[shared], help="WinRM remote execution (PowerShell)")
+    winrm_parser.add_argument("-p", "--password", required=True, help="password or path to file with passwords (one per line)")
+    winrm_parser.add_argument("-i", "--interactive", action="store_true", help="drop into an interactive PowerShell session on the remote host (single host only)")
+    winrm_parser.set_defaults(target_os="windows", shell="powershell", encrypt=True)
+
+    ssh_parser = subparsers.add_parser("ssh", parents=[shared], help="SSH remote execution (Windows or Linux targets)")
+    ssh_parser.add_argument("-p", "--password", default=None, help="password or path to file with passwords (one per line). Optional: if omitted, SSH key-based auth is used (agent + ~/.ssh/ keys).")
+    ssh_parser.add_argument("--os", choices=["windows", "linux"], default="windows", dest="target_os", help="target host OS (default: windows)")
+    ssh_parser.set_defaults(shell="powershell", encrypt=True, interactive=False)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
-    
-    # Validate --os is only used with ssh protocol.
-    if args.target_os == "linux" and args.protocol != "ssh":
-        parser.error("--os linux is only supported with the ssh protocol")
-    
-    # Validate protocol-specific arguments.
-    if args.protocol != "smb" and args.shell != "powershell":
-        parser.error("--shell is only supported when --protocol smb; for winrm and ssh, PowerShell is always used")
 
-    if args.interactive:
-        if args.protocol != "winrm":
-            parser.error("--interactive is only supported with the winrm protocol")
-        if args.command or args.script or args.upload or args.download:
-            parser.error("--interactive cannot be combined with --command, --script, --upload, or --download")
+    if args.interactive and (args.command or args.script or args.upload or args.download):
+        parser.error("--interactive cannot be combined with --command, --script, --upload, or --download")
     
     # Extract source/dest and download flag from the parsed arguments.
     source = None
@@ -899,11 +928,10 @@ def main():
 
     usernames = parse_target_or_file(args.username, expand_entries=False)
 
-    # Password handling: required for smb/winrm, optional for ssh (key-based auth).
+    # Password handling: required for smb/winrm (enforced by argparse), optional
+    # for ssh. None signals key-based auth to the ssh layer; "" remains a real
+    # password value.
     if args.password is None:
-        if args.protocol != "ssh":
-            parser.error(f"-p/--password is required for protocol '{args.protocol}' (only ssh supports key-based auth)")
-        # None signals key-based auth to the ssh layer; "" remains a real password value.
         passwords = [None]
     else:
         passwords = parse_target_or_file(args.password, expand_entries=False)
