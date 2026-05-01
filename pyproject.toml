@@ -1,0 +1,22 @@
+[project]
+name = "tomoe-exec"
+version = "1.0.4"
+description = "Remote administration over WinRM, SMB, or SSH."
+requires-python = ">=3.10"
+dependencies = [
+    "pypsexec>=0.3.0",
+    "pypsrp>=0.8.0",
+    "paramiko>=3.0.0",
+    "rich>=13.0.0",
+    "smbprotocol>=1.16.0",
+]
+
+[project.scripts]
+tomoe = "tomoe:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["tomoe", "wsman", "smb", "ssh"]

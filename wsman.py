@@ -1,8 +1,16 @@
 import os
+import shlex
 import socket
 from pypsrp.powershell import PowerShell, RunspacePool
 from pypsrp.wsman import WSMan
 from pypsrp.client import Client
+
+# Importing readline enables arrow-key line editing and history for input().
+# Not available on stock Windows Python; harmless to skip there.
+try:
+    import readline  # noqa: F401
+except ImportError:
+    pass
 
 
 class WinRMAuthenticationError(Exception):
@@ -206,6 +214,210 @@ def run_winrm(target_ip, username, password, domain="", script_path=None, comman
         if verbose:
             print(f"[!] WinRM execution failed: {e}")
         raise
+
+
+def run_winrm_shell(target_ip, username, password, domain="", verbose=False):
+    """
+    Open a persistent PowerShell runspace on a remote Windows host and run an
+    interactive REPL on stdin/stdout. Authentication errors raised during the
+    handshake propagate as WinRMAuthenticationError so the caller can rotate
+    credentials; runtime errors during the REPL are rendered to the user and
+    do not propagate.
+    """
+    if not check_port_open(target_ip, 5985, timeout=5):
+        raise WinRMConnectionError(f"Port 5985 not reachable on {target_ip}")
+
+    auth_username = f"{domain}\\{username}" if domain else username
+
+    try:
+        wsman = WSMan(
+            server=target_ip,
+            port=5985,
+            username=auth_username,
+            password=password,
+            ssl=False,
+            auth="ntlm",
+            encryption="auto",
+            connection_timeout=30,
+            read_timeout=30,
+        )
+        # Capture the local working directory at session start so 'download'
+        # always lands files where the user invoked the shell from, even if
+        # the parent process changes cwd later.
+        local_cwd = os.getcwd()
+
+        with RunspacePool(wsman) as pool:
+            # Past this point, authentication has succeeded.
+            _repl_loop(pool, target_ip=target_ip, username=username,
+                       password=password, domain=domain, verbose=verbose,
+                       local_cwd=local_cwd)
+
+    except Exception as e:
+        error_str = str(e).lower()
+
+        if any(auth_err in error_str for auth_err in [
+            "unauthorized", "401", "authentication", "logon_failure",
+            "access_denied", "invalid credentials", "kerberos", "ntlm",
+            "denied", "rejected"
+        ]):
+            if verbose:
+                print(f"[!] WinRM authentication failed: {e}")
+            raise WinRMAuthenticationError(f"Authentication failed for {username}@{target_ip}: {e}")
+
+        if any(conn_err in error_str for conn_err in [
+            "connection", "timeout", "refused", "unreachable", "reset"
+        ]):
+            if verbose:
+                print(f"[!] WinRM connection failed: {e}")
+            raise WinRMConnectionError(f"Connection failed to {target_ip}: {e}")
+
+        if verbose:
+            print(f"[!] WinRM shell failed: {e}")
+        raise
+
+
+def _handle_transfer(line, remote_cwd, local_cwd, target_ip, username, password, domain, verbose):
+    """Parse and dispatch a single 'upload' or 'download' built-in line.
+
+    Evil-winrm-style: each takes exactly one path.
+      upload <local>     -> drops basename(local) into the remote cwd
+      download <remote>  -> drops basename(remote) into the local cwd captured
+                            when the shell session started
+    """
+    try:
+        tokens = shlex.split(line)
+    except ValueError as e:
+        print(f"ERROR: could not parse arguments: {e}")
+        return
+
+    cmd = tokens[0].lower()
+    args = tokens[1:]
+
+    if cmd == "upload":
+        if len(args) != 1:
+            print("Usage: upload <local>")
+            return
+        local = args[0]
+        if not os.path.exists(local):
+            print(f"ERROR: local source not found: {local}")
+            return
+        remote_name = os.path.basename(local.rstrip("/\\")) or os.path.basename(local)
+        if not remote_cwd:
+            print("ERROR: remote cwd unknown; cannot resolve upload destination")
+            return
+        remote_dest = remote_cwd.rstrip("\\") + "\\" + remote_name
+        try:
+            output = run_winrm_copy(
+                target_ip=target_ip, username=username, password=password,
+                domain=domain, source=local, dest=remote_dest,
+                verbose=verbose,
+            )
+            print(output)
+        except Exception as e:
+            print(f"ERROR: upload failed: {e}")
+        return
+
+    # download
+    if len(args) != 1:
+        print("Usage: download <remote>")
+        return
+    remote = args[0]
+    local_name = os.path.basename(remote.replace("\\", "/").rstrip("/")) or "downloaded_file"
+    local_dest = os.path.join(local_cwd, local_name)
+    try:
+        output = run_winrm_download(
+            target_ip=target_ip, username=username, password=password,
+            domain=domain, source=remote, dest=local_dest,
+            verbose=verbose,
+        )
+        print(output)
+    except Exception as e:
+        print(f"ERROR: download failed: {e}")
+
+
+def _get_remote_cwd(pool):
+    """Query the remote runspace for its current location. Returns None if
+    the query fails so the caller can fall back to a static prompt."""
+    try:
+        ps = PowerShell(pool)
+        ps.add_script("(Get-Location).Path")
+        ps.invoke()
+        for item in ps.output:
+            text = str(item).strip()
+            if text:
+                return text
+    except Exception:
+        pass
+    return None
+
+
+def _repl_loop(pool, target_ip, username, password, domain, verbose, local_cwd):
+    """Read-eval-print loop against an open RunspacePool. State (variables,
+    cwd, imported modules) persists across iterations because the runspace
+    is reused; only the PowerShell pipeline is rebuilt each command.
+
+    Credentials and the local starting cwd are passed through so the
+    'upload' and 'download' built-ins can spin up file-transfer
+    connections via the existing helpers."""
+    while True:
+        cwd = _get_remote_cwd(pool)
+        prompt = f"PS {cwd}> " if cwd else "PS> "
+        try:
+            line = input(prompt)
+        except EOFError:
+            print()
+            return
+        except KeyboardInterrupt:
+            # Ctrl-C at the prompt: clear the line, re-prompt.
+            print()
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.lower() in ("exit", "quit"):
+            return
+
+        first_token = stripped.split(None, 1)[0].lower()
+        if first_token in ("upload", "download"):
+            _handle_transfer(stripped, remote_cwd=cwd, local_cwd=local_cwd,
+                             target_ip=target_ip, username=username,
+                             password=password, domain=domain, verbose=verbose)
+            continue
+
+        ps = PowerShell(pool)
+        # Wrap user input in a dot-sourced script block piped through
+        # Out-String -Stream. This makes the remote PowerShell run its own
+        # format engine (so 'cat', 'ls', etc. render the way they would
+        # interactively) and return plain strings, sidestepping pypsrp's
+        # PSObject __str__ quirks. Dot-sourcing keeps variables and other
+        # session state in the caller's scope so REPL state still persists.
+        ps.add_script(". { " + line + " } | Out-String -Stream")
+
+        try:
+            ps.invoke()
+        except KeyboardInterrupt:
+            try:
+                ps.stop()
+            except Exception:
+                pass
+            print("^C")
+            continue
+        except Exception as e:
+            print(f"ERROR: {e}")
+            continue
+
+        for item in ps.output:
+            if item is None:
+                continue
+            print(item)
+        if hasattr(ps, "streams"):
+            for info in ps.streams.information or []:
+                print(info.message_data)
+            for warning in ps.streams.warning or []:
+                print(f"WARNING: {warning}")
+            for error in ps.streams.error or []:
+                print(f"ERROR: {error}")
 
 
 def run_winrm_copy(target_ip, username, password, domain="", source="", dest="", verbose=False, status_callback=None):

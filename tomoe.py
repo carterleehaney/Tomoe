@@ -47,7 +47,7 @@ class LiveLogHandler(logging.Handler):
 
 
 from smb import run_psexec, run_smb_copy, run_smb_download
-from wsman import run_winrm, run_winrm_copy, run_winrm_download
+from wsman import run_winrm, run_winrm_copy, run_winrm_download, run_winrm_shell, WinRMAuthenticationError
 from ssh import run_ssh, run_ssh_copy, run_ssh_download
 
 
@@ -457,6 +457,52 @@ def execute_on_host(
     )
 
 
+def run_interactive_shell(host, usernames, passwords, domain, verbose, console) -> int:
+    """Try credentials in order against a single host; on first auth success,
+    drop into an interactive PowerShell REPL. Returns a process exit code:
+    0 clean exit, 2 all credentials failed, 1 other error, 130 Ctrl-C during auth.
+
+    Mirrors the auth-error string-matching from execute_on_host so behavior is
+    consistent: any exception whose message matches an auth pattern is treated
+    as 'try the next credential'."""
+    auth_error_patterns = [
+        "logon_failure", "access_denied", "authentication",
+        "login failed", "invalid credentials", "unauthorized",
+        "status_logon_failure", "kerberos", "credentials were rejected",
+        "bad password", "wrong password", "access is denied",
+        "rejected", "401"
+    ]
+
+    for username in usernames:
+        for password in passwords:
+            console.print(f"[dim]Authenticating as {username}@{host}...[/dim]")
+            try:
+                run_winrm_shell(
+                    target_ip=host,
+                    username=username,
+                    password=password,
+                    domain=domain,
+                    verbose=verbose,
+                )
+                return 0
+            except WinRMAuthenticationError:
+                console.print(f"[yellow]Auth failed for {username}, trying next...[/yellow]")
+                continue
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Interrupted.[/yellow]")
+                return 130
+            except Exception as e:
+                msg = str(e).lower()
+                if any(p in msg for p in auth_error_patterns):
+                    console.print(f"[yellow]Auth failed for {username}, trying next...[/yellow]")
+                    continue
+                console.print(f"[red]Error: {e}[/red]")
+                return 1
+
+    console.print("[red]All credentials failed.[/red]")
+    return 2
+
+
 def run_concurrent_execution(
     hosts: list[str],
     usernames: list[str],
@@ -760,7 +806,7 @@ def write_output_files(results: list[HostResult], output_dir: str, console: Cons
     console.print(f"[bold]Output:[/bold] Wrote {written_count} file(s) to {output_dir}/")
 
 
-if __name__ == "__main__":
+def main():
     # Parse arguments.
     parser = argparse.ArgumentParser(
         usage="tomoe.py {smb, winrm, ssh} <ip/file> -u <username/file> -p <password/file> [--script <script> | --command <command> | --upload <source> <dest> | --download <source> <dest>]",
@@ -789,6 +835,7 @@ if __name__ == "__main__":
     parser.add_argument("-a", "--args", default="", help="arguments to pass to the script")
     parser.add_argument("--shell", choices=["powershell", "cmd"], default="powershell", help="shell type for SMB protocol (default: powershell)")
     parser.add_argument("--no-encrypt", dest="encrypt", action="store_false", default=True, help="disable SMB encryption (encryption is enabled by default)")
+    parser.add_argument("-i", "--interactive", action="store_true", help="drop into an interactive PowerShell session on the remote host (winrm only, single host)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show verbose status messages")
     parser.add_argument("--show-failures", action="store_true", help="show failed hosts in the compact-mode completion log")
     parser.add_argument("-t", "--threads", type=int, default=10, help="maximum concurrent threads (default: 10)")
@@ -803,6 +850,12 @@ if __name__ == "__main__":
     # Validate protocol-specific arguments.
     if args.protocol != "smb" and args.shell != "powershell":
         parser.error("--shell is only supported when --protocol smb; for winrm and ssh, PowerShell is always used")
+
+    if args.interactive:
+        if args.protocol != "winrm":
+            parser.error("--interactive is only supported with the winrm protocol")
+        if args.command or args.script or args.upload or args.download:
+            parser.error("--interactive cannot be combined with --command, --script, --upload, or --download")
     
     # Extract source/dest and download flag from the parsed arguments.
     source = None
@@ -826,8 +879,8 @@ if __name__ == "__main__":
             parser.error(f"local destination parent directory not found: {dest_parent}")
     else:
         # Command execution mode
-        if not args.script and not args.command:
-            parser.error("either --script, --command, --upload, or --download is required")
+        if not args.script and not args.command and not args.interactive:
+            parser.error("either --script, --command, --upload, --download, or --interactive is required")
     
     # Set logging level based on verbose flag.
     if args.verbose:
@@ -840,6 +893,9 @@ if __name__ == "__main__":
         hosts = parse_target_or_file(args.target)
     except ValueError as exc:
         parser.error(str(exc))
+
+    if args.interactive and len(hosts) > 1:
+        parser.error(f"--interactive requires a single target host (got {len(hosts)})")
 
     usernames = parse_target_or_file(args.username, expand_entries=False)
 
@@ -876,6 +932,19 @@ if __name__ == "__main__":
             console.print(f"  Note: Per-host subdirectories will be created under {dest}")
     console.print()
 
+    # Interactive shell: skip the Live UI / thread pool entirely and hand
+    # stdin/stdout to the user once a credential authenticates.
+    if args.interactive:
+        exit_code = run_interactive_shell(
+            host=hosts[0],
+            usernames=usernames,
+            passwords=passwords,
+            domain=args.domain,
+            verbose=args.verbose,
+            console=console,
+        )
+        raise SystemExit(exit_code)
+
     # Run concurrent execution.
     results, compact_mode = run_concurrent_execution(
         hosts=hosts,
@@ -904,3 +973,7 @@ if __name__ == "__main__":
     # Write output files if output directory specified.
     if args.output:
         write_output_files(results, args.output, console)
+
+
+if __name__ == "__main__":
+    main()
