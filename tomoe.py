@@ -820,8 +820,8 @@ def build_parser() -> argparse.ArgumentParser:
     shared.add_argument("-u", "--username", required=True, help="username or path to file with usernames (one per line)")
 
     exec_group = shared.add_mutually_exclusive_group(required=False)
-    exec_group.add_argument("-s", "--script", help="local path to script to execute (PowerShell on Windows, bash on Linux)")
-    exec_group.add_argument("-c", "--command", help="command to execute (PowerShell on Windows, shell on Linux)")
+    exec_group.add_argument("-s", "--script", help="local path to a script to execute on the remote host")
+    exec_group.add_argument("-c", "--command", help="command to execute on the remote host")
 
     transfer_group = shared.add_mutually_exclusive_group(required=False)
     transfer_group.add_argument("--upload", nargs=2, metavar=("SOURCE", "DEST"), help="upload local SOURCE to remote DEST")
