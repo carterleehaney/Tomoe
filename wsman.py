@@ -283,9 +283,12 @@ def _handle_transfer(line, remote_cwd, local_cwd, target_ip, username, password,
       upload <local>     -> drops basename(local) into the remote cwd
       download <remote>  -> drops basename(remote) into the local cwd captured
                             when the shell session started
+
+    Parse with ``posix=False`` so Windows-style backslashes are preserved.
+    Paths containing spaces should still be quoted.
     """
     try:
-        tokens = shlex.split(line)
+        tokens = shlex.split(line, posix=False)
     except ValueError as e:
         print(f"ERROR: could not parse arguments: {e}")
         return
