@@ -6,6 +6,16 @@ Tomoe is a python utility for remote administration over multiple protocols with
 - **SMB** — [pypsexec](https://pypi.org/project/pypsexec/)
 - **SSH** — [paramiko](https://pypi.org/project/paramiko/)
 
+## Installation
+
+Tomoe is now on PyPI! Installation is as easy as:
+
+```
+pipx install tomoe-exec
+```
+
+---
+
 ```PowerShell
 PS C:\Users\carte\Documents\GitHub\Tomoe> py .\tomoe.py winrm .\Credentials\hosts -u .\Credentials\usernames -p .\Credentials\passwords --command "whoami"
 
