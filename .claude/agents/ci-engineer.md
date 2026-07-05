@@ -2,10 +2,11 @@
 name: ci-engineer
 description: >-
   CI/CD and tooling agent for Tomoe. Splits the failing test.yml into a blocking ci.yml
-  (lint + unit/parity + build) and a non-blocking integration.yml; fixes the SSH Docker
-  privileged-port bind and the WinRM/SMB local-account token-filtering failures; and wires up
-  ruff + mypy config plus a dev extra in pyproject.toml. Can run in parallel with the refactor
-  agents, but its lint/type gates only turn fully green once their work lands.
+  (lint + unit/parity + build) and a non-blocking integration.yml built on the correct model —
+  Tomoe is a pure client, so pytest always runs on Linux and connects OUT to containerized
+  targets (openssh, Samba). Deletes the self-targeting Windows WinRM job (its wsmprovhost launch
+  failure is unfixable on hosted runners); wires up ruff + mypy config plus a dev extra. Can run
+  in parallel with the refactor agents, but its lint/type gates only turn green once their work lands.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: sonnet
 ---
@@ -21,48 +22,71 @@ Read `.github/workflows/test.yml`, `.github/workflows/release.yml`, `pyproject.t
 `tests/conftest.py` + the integration tests (`tests/test_ssh.py`, `test_winrm.py`, `test_smb.py`)
 so you match the fixtures' expected env vars (e.g. `SSH_TEST_PORT`, test user/passwords).
 
+## The correct mental model (read this before touching YAML)
+
+Tomoe is a **pure client** — a Python utility that connects OUT to remote hosts. So the test
+runner should always be Linux (`ubuntu-latest`) running pytest+tomoe as the *client*, connecting
+to a *target*. The original `test.yml` got this wrong for Windows: it ran `windows-latest`
+PSRemoting to **itself** (localhost), which fails with `WSManFaultError 0x80338114`
+("could not launch a host process") — the WSMan provider host can't launch on hosted runners.
+That is **not fixable** with config tweaks; do not try. Auth even succeeded there — it's the
+plugin-host launch that dies. Delete that job entirely.
+
+Constraints that shape the design:
+- **WinRM has no Linux server** (it's the Windows WS-Management service; OMI is deprecated/CVE-
+  ridden — don't use it). A Linux runner has nothing to PSRemote *to*. GitHub-hosted service
+  containers are **Docker/Linux only**, and two hosted runners can't network to each other. So a
+  real WinRM target requires self-hosted/cloud Windows and must NEVER gate CI.
+- **SMB execute** uses `pypsexec` (creates+starts a Windows *service* over ADMIN$) → genuinely
+  needs real Windows. But **SMB file transfer** (smbclient) works fine against a **Samba
+  container** on Linux.
+- **SSH** already works as intended: Linux client → openssh container.
+
 ## Why CI fails today
 
 - **`ssh-integration`**: forces the linuxserver/openssh container to bind privileged port 22
   (`LISTEN_PORT: "22"`) — that image runs sshd as non-root and defaults to 2222, so the bind can
   fail; then a wait loop does `exit 1`, failing the whole job before pytest runs and bypassing the
   tests' graceful skip.
-- **`winrm-smb-integration`**: WinRM (5985) and SMB (445) are always open on the Windows runner,
-  so the tests never skip; real Basic-auth WinRM and PsExec-to-localhost as a *freshly created
-  local admin* fail because UAC remote-token filtering blocks local-account remote auth
-  (`LocalAccountTokenFilterPolicy` is not set).
+- **`winrm-smb-integration`**: runs `windows-latest` PSRemoting to localhost; WinRM host-process
+  launch fails (`0x80338114`). Unfixable on hosted runners — the job must be removed, not repaired.
 - No lint/type/build job exists at all.
 
 ## Deliverable 1 — split workflows
 
 Replace `test.yml` with:
 
-**`.github/workflows/ci.yml` — required, triggers on push to main + PRs to main:**
+**`.github/workflows/ci.yml` — required, triggers on push to main + PRs to main. All jobs on
+`ubuntu-latest`, Python 3.10 (client always runs on Linux):**
 - `lint`: `pip install -e ".[dev]"`; `ruff check .`; `ruff format --check .`; `mypy tomoe/`.
 - `unit`: `pip install -e ".[test]"`; `pytest tests/test_cli.py tests/test_common.py
   tests/test_orchestrator.py tests/test_parity.py tests/test_features.py -v`. (Coordinate names
-  with parity-test-engineer; those files are server-free.)
+  with parity-test-engineer; those files are server-free and mock pypsrp/pypsexec/paramiko — they
+  are where WinRM/SMB/SSH **client-logic** coverage actually lives.)
 - `build`: `pip install build twine`; `python -m build`; `twine check dist/*`; and an import
   smoke test `python -c "import tomoe; import tomoe.cli"`.
-- All three run on `ubuntu-latest`, Python 3.10 (keep parity with the supported floor; optionally
-  add a matrix 3.10–3.12 for `unit` if cheap).
+- Optionally add a matrix 3.10–3.12 for `unit` if cheap.
 
 **`.github/workflows/integration.yml` — non-blocking, `workflow_dispatch` + optional nightly
-`schedule`:**
-- `ssh`: keep the `lscr.io/linuxserver/openssh-server` service but **remove `LISTEN_PORT: "22"`**
-  and map `2222:2222` (the image's default internal port — no privileged bind). Keep the wait
-  loop but make it informational (don't hard-fail the job on timeout; `continue-on-error: true` on
-  the job). Pass `SSH_TEST_PORT: "2222"` to pytest. Pin the image to a specific tag rather than
-  `:latest`.
-- `winrm-smb`: on `windows-latest`, BEFORE creating the local admin, set
-  `LocalAccountTokenFilterPolicy=1`:
-  `New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force`.
-  Keep `Enable-PSRemoting`, Basic auth, and AllowUnencrypted. Mark the job `continue-on-error:
-  true` so environmental flakiness (PsExec-to-localhost) never blocks merges while still surfacing
-  results.
+`schedule`. Every job is Linux client → containerized target:**
+- `ssh` (`ubuntu-latest`): keep the `lscr.io/linuxserver/openssh-server` service but **remove
+  `LISTEN_PORT: "22"`** and map `2222:2222` (the image's default internal port — no privileged
+  bind). Keep the wait loop but make it informational; set `continue-on-error: true` on the job.
+  Pass `SSH_TEST_PORT: "2222"` to pytest. Pin the image to a specific tag rather than `:latest`.
+- `smb-fileops` (`ubuntu-latest`): stand up a **Samba container** service (e.g.
+  `dperson/samba` or `ghcr.io/servercontainers/samba`, pinned) exposing 445 with a test share +
+  the conftest test user/password. Run ONLY the SMB **file transfer** tests against it
+  (`pytest tests/test_smb.py -k "upload or download"` or an equivalent marker). `continue-on-
+  error: true`. NOTE: this does NOT cover the pypsexec *execute* path (Samba can't create Windows
+  services) — leave SMB-execute to the mock feature tests + the manual real-Windows path below.
+- **Do NOT create any `windows-latest` job.** Real WinRM + SMB-execute E2E requires a Windows
+  target Tomoe connects to (self-hosted runner or a cloud VM). If you add anything, add a
+  `workflow_dispatch`-only, self-hosted-labelled job (or just a documented `# TODO` block) so it
+  never runs on hosted CI and never gates merges. Prefer leaving it out and documenting it in the
+  workflow comments + README.
 
-Because `integration.yml` doesn't run on the `pull_request`/`push` events that gate merges (or is
-`continue-on-error`), the required status set becomes lint + unit + build only.
+Because `integration.yml` runs only on `workflow_dispatch`/`schedule` (and its jobs are
+`continue-on-error`), the required status set is exactly lint + unit + build.
 
 ## Deliverable 2 — pyproject tooling
 
@@ -98,6 +122,10 @@ file names yourself — reference the names the parity-test-engineer is producin
 - Lint the workflow YAML (`python -c "import yaml,glob; [yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yml')]"`).
 - Confirm the SSH service config no longer forces a privileged bind and that `SSH_TEST_PORT`
   matches what `tests/conftest.py`/`tests/test_ssh.py` expect.
+- Confirm **no `windows-latest` / self-targeting WinRM job** remains anywhere in
+  `.github/workflows/` (`grep -rn "windows-latest\|Enable-PSRemoting\|LocalAccountTokenFilterPolicy" .github/`
+  returns nothing), and that all integration jobs are `ubuntu-latest` + `continue-on-error` and
+  run only on `workflow_dispatch`/`schedule`.
 - Confirm `grep -rn "tomoe.protocols" pyproject.toml` returns nothing and packages list matches
   the on-disk layout.
 
