@@ -21,7 +21,7 @@ jobs:
         run: pip install -e ".[test]"
 
       - name: Run unit tests
-        run: pytest tests/test_cli.py tests/test_common.py tests/test_orchestrator.py -v
+        run: pytest tests/test_cli.py tests/test_common.py tests/test_orchestrator.py tests/test_features.py -v
 
   ssh-integration:
     runs-on: ubuntu-latest

@@ -6,7 +6,7 @@ from pypsrp.powershell import PowerShell, RunspacePool
 from pypsrp.wsman import WSMan
 from pypsrp.client import Client
 
-from tomoe.common import AuthenticationError, ConnectionError, check_port_open, build_auth_username
+from tomoe.common import AuthenticationError, ConnectionError, check_port_open, build_auth_username, run_interruptible
 
 # Importing readline enables arrow-key line editing and history for input().
 # Not available on stock Windows Python; harmless to skip there.
@@ -38,6 +38,9 @@ def _client_kwargs(host, auth_username, password):
 
 def execute(host, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None, shutdown_event=None):
     """Execute a PowerShell script or command on a remote host via WinRM."""
+    if shutdown_event is not None and shutdown_event.is_set():
+        raise KeyboardInterrupt(f"Interrupted by user before executing on {host}")
+
     if not check_port_open(host, 5985, timeout=5):
         raise ConnectionError(f"Port 5985 not reachable on {host}")
 
@@ -74,7 +77,7 @@ def execute(host, username, password, domain="", script_path=None, command=None,
 
             if status_callback:
                 status_callback("Executing...")
-            ps.invoke()
+            run_interruptible(ps.invoke, shutdown_event, host)
 
             logger.debug("Command executed, had_errors: %s", ps.had_errors)
 

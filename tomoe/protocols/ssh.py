@@ -5,7 +5,7 @@ import random
 import string
 import paramiko
 
-from tomoe.common import AuthenticationError, ConnectionError, check_port_open, build_auth_username
+from tomoe.common import AuthenticationError, ConnectionError, check_port_open, build_auth_username, run_interruptible
 
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,9 @@ def _create_ssh_client(target_ip, auth_username, password, verbose=False):
 
 def execute(host, username, password, domain="", script_path=None, command=None, script_args="", verbose=False, status_callback=None, target_os="windows", shutdown_event=None):
     """Execute a script or command on a remote host using SSH."""
+
+    if shutdown_event is not None and shutdown_event.is_set():
+        raise KeyboardInterrupt(f"Interrupted by user before executing on {host}")
 
     is_linux = target_os == "linux"
 
@@ -116,12 +119,18 @@ def execute(host, username, password, domain="", script_path=None, command=None,
         if status_callback:
             status_callback("Executing...")
 
-        stdin, stdout, stderr = client.exec_command(cmd_args, timeout=300)
+        def _run_command():
+            stdin, stdout, stderr = client.exec_command(cmd_args, timeout=300)
+            # Read stdout and stderr.
+            out = stdout.read().decode('utf-8', errors='replace').replace('\r', '').strip()
+            err = stderr.read().decode('utf-8', errors='replace').replace('\r', '').strip()
+            code = stdout.channel.recv_exit_status()
+            return out, err, code
 
-        # Read stdout and stderr.
-        stdout_text = stdout.read().decode('utf-8', errors='replace').replace('\r', '').strip()
-        stderr_text = stderr.read().decode('utf-8', errors='replace').replace('\r', '').strip()
-        exit_code = stdout.channel.recv_exit_status()
+        # Run in an interruptible wrapper so Ctrl-C (shutdown_event) can abort a
+        # long-running command mid-flight; the finally block below closes the
+        # client, which unblocks the abandoned read.
+        stdout_text, stderr_text, exit_code = run_interruptible(_run_command, shutdown_event, host)
 
         logging.info("Command executed, exit code: %d", exit_code)
         logging.debug("stdout: %d chars, stderr: %d chars", len(stdout_text), len(stderr_text))
