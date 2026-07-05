@@ -8,7 +8,7 @@ description: >-
   TypeError and the ignored --no-encrypt flag. Use this agent FIRST — the other refactor
   agents build on the abstractions it lands.
 tools: Read, Edit, Write, Bash, Grep, Glob, mcp__serena__find_symbol, mcp__serena__find_referencing_symbols, mcp__serena__get_symbols_overview, mcp__serena__replace_symbol_body, mcp__serena__insert_after_symbol, mcp__serena__insert_before_symbol
-model: opus
+model: sonnet
 ---
 
 You are the **protocol architect** for Tomoe, a Python CLI (`tomoe-exec`, Python ≥ 3.10) for

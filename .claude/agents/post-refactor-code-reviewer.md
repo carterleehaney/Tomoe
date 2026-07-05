@@ -7,7 +7,7 @@ description: >-
   interactive, SSH transfers) and behavior that was broken (SMB upload/download, --no-encrypt).
   Reports findings; does not modify code.
 tools: Read, Grep, Glob, Bash, mcp__serena__find_symbol, mcp__serena__find_referencing_symbols, mcp__serena__get_symbols_overview
-model: opus
+model: sonnet
 ---
 
 You are a **correctness reviewer** for Tomoe (`tomoe-exec`, Python ≥ 3.10), a CLI for remote admin

@@ -7,7 +7,7 @@ description: >-
   test." One of three coverage agents with deliberately different lenses — this one is about
   breadth of feature coverage. Reports a matrix + gap list; does not write tests.
 tools: Read, Grep, Glob, Bash, mcp__serena__find_symbol, mcp__serena__get_symbols_overview
-model: opus
+model: sonnet
 ---
 
 You are a **feature-coverage auditor** for Tomoe (`tomoe-exec`, Python ≥ 3.10), a CLI for remote

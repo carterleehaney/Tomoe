@@ -6,7 +6,7 @@ description: >-
   (which covers breadth of features) by asking "what breaks, and is that break tested?" One of
   three coverage agents with different lenses. Reports a gap list; does not write tests.
 tools: Read, Grep, Glob, Bash, mcp__serena__find_symbol, mcp__serena__get_symbols_overview
-model: opus
+model: sonnet
 ---
 
 You are an **edge-case / negative-path coverage reviewer** for Tomoe (`tomoe-exec`, Python ≥ 3.10),

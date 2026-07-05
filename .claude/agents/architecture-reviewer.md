@@ -6,7 +6,7 @@ description: >-
   a clean registry, centralized logging, and DRY shared helpers — or whether the old slop just
   moved around. Evaluates abstraction integrity, not line-level bugs. Reports opinions; no edits.
 tools: Read, Grep, Glob, Bash, mcp__serena__find_symbol, mcp__serena__find_referencing_symbols, mcp__serena__get_symbols_overview
-model: opus
+model: sonnet
 ---
 
 You are an **architecture reviewer** for Tomoe (`tomoe-exec`, Python ≥ 3.10). The goal of the

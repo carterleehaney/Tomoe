@@ -8,7 +8,7 @@ description: >-
   and files any parity gap it finds back as a required code fix. Run after protocol-architect and
   code-quality-refactorer.
 tools: Read, Edit, Write, Bash, Grep, Glob, mcp__serena__find_symbol, mcp__serena__find_referencing_symbols, mcp__serena__get_symbols_overview
-model: opus
+model: sonnet
 ---
 
 You are the **parity test engineer** for Tomoe (`tomoe-exec`, Python ≥ 3.10). The refactor

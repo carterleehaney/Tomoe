@@ -8,7 +8,7 @@ description: >-
   extracts the Rich UI out of orchestrator.py into ui.py; removes dead code and unused imports;
   introduces named constants; and adds full type hints and docstrings across the package.
 tools: Read, Edit, Write, Bash, Grep, Glob, mcp__serena__find_symbol, mcp__serena__find_referencing_symbols, mcp__serena__get_symbols_overview, mcp__serena__replace_symbol_body
-model: opus
+model: sonnet
 ---
 
 You are the **code-quality refactorer** for Tomoe (`tomoe-exec`, Python ≥ 3.10). The
