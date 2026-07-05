@@ -1,0 +1,95 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -e ".[test]"
+
+      - name: Run unit tests
+        run: pytest tests/test_cli.py tests/test_common.py tests/test_orchestrator.py -v
+
+  ssh-integration:
+    runs-on: ubuntu-latest
+    services:
+      ssh:
+        image: lscr.io/linuxserver/openssh-server:latest
+        env:
+          USER_NAME: testuser
+          USER_PASSWORD: testpass123
+          PASSWORD_ACCESS: "true"
+          LISTEN_PORT: "22"
+        ports:
+          - 2222:22
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -e ".[test]"
+
+      - name: Wait for SSH server
+        run: |
+          for i in $(seq 1 30); do
+            if nc -z localhost 2222; then
+              echo "SSH server is ready"
+              exit 0
+            fi
+            echo "Waiting for SSH server... ($i/30)"
+            sleep 2
+          done
+          echo "SSH server did not start in time"
+          exit 1
+
+      - name: Run SSH integration tests
+        env:
+          SSH_TEST_PORT: "2222"
+        run: pytest tests/test_ssh.py -v
+
+  winrm-smb-integration:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Configure WinRM
+        shell: powershell
+        run: |
+          Enable-PSRemoting -Force
+          Set-Item WSMan:\localhost\Service\Auth\Basic -Value $true
+          Set-Item WSMan:\localhost\Service\AllowUnencrypted -Value $true
+          winrm set winrm/config/service '@{AllowUnencrypted="true"}'
+
+      - name: Configure SMB test user
+        shell: powershell
+        run: |
+          net user testuser TestPass123! /add
+          net localgroup Administrators testuser /add
+
+      - name: Install dependencies
+        run: pip install -e ".[test]"
+
+      - name: Run WinRM and SMB integration tests
+        run: pytest tests/test_winrm.py tests/test_smb.py -v

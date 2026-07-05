@@ -11,12 +11,20 @@ dependencies = [
     "smbprotocol>=1.16.0",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
 [project.scripts]
-tomoe = "tomoe:main"
+tomoe = "tomoe.cli:main"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests that require external services (SSH, WinRM, SMB servers)",
+]
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["tomoe", "wsman", "smb", "ssh"]
+packages = ["tomoe", "tomoe.protocols"]
