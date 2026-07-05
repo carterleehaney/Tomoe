@@ -2,11 +2,11 @@
 
 from threading import Lock, Event
 from unittest.mock import MagicMock
-from types import ModuleType
 
 import pytest
 
 from tomoe.common import AuthenticationError
+from tomoe.connections.base import Connection, ExecResult
 from tomoe.orchestrator import HostResult, HostStatus, execute_on_host
 
 
@@ -41,22 +41,51 @@ class TestHostStatus:
 
 
 class TestExecuteOnHost:
-    def _make_mock_protocol(self, execute_side_effect=None, upload_side_effect=None, download_side_effect=None):
-        """Create a mock protocol module with execute/upload/download."""
-        proto = ModuleType("mock_proto")
-        proto.execute = MagicMock(side_effect=execute_side_effect) if execute_side_effect else MagicMock(return_value="output")
-        proto.upload = MagicMock(side_effect=upload_side_effect) if upload_side_effect else MagicMock(return_value="uploaded")
-        proto.download = MagicMock(side_effect=download_side_effect) if download_side_effect else MagicMock(return_value="downloaded")
-        return proto
+    def _make_mock_connection_cls(self, execute_side_effect=None, upload_side_effect=None, download_side_effect=None):
+        """Build a fake Connection subclass backed by trackable MagicMocks.
 
-    def _run_execute(self, proto, usernames, passwords, **kwargs):
-        """Run execute_on_host with the given mock protocol, patching get_protocol."""
-        import tomoe.orchestrator as orch
-        import tomoe.protocols as protocols
+        The mocks live on the class (not per-instance) so assertions like
+        ``execute_mock.assert_called_once()`` see calls across every
+        credential attempt, since ``execute_on_host`` instantiates a fresh
+        connection object per username/password pair.
+        """
+        execute_mock = MagicMock(side_effect=execute_side_effect) if execute_side_effect else MagicMock(
+            return_value=ExecResult(host="10.0.0.1", stdout="output")
+        )
+        upload_mock = MagicMock(side_effect=upload_side_effect) if upload_side_effect else MagicMock(return_value="uploaded")
+        download_mock = MagicMock(side_effect=download_side_effect) if download_side_effect else MagicMock(return_value="downloaded")
 
-        original_protocols = protocols.PROTOCOLS.copy()
+        class FakeConnection(Connection):
+            DEFAULT_PORT = 1
+            PROTOCOL = "mock"
+
+            def connect(self):
+                pass
+
+            def execute(self, command=None, *, script_path=None, script_args="", status_callback=None, shutdown_event=None):
+                return execute_mock(
+                    command=command, script_path=script_path, script_args=script_args,
+                    status_callback=status_callback, shutdown_event=shutdown_event,
+                )
+
+            def put_file(self, src, dst, *, status_callback=None):
+                return upload_mock(src=src, dst=dst, status_callback=status_callback)
+
+            def get_file(self, src, dst, *, status_callback=None):
+                return download_mock(src=src, dst=dst, status_callback=status_callback)
+
+        FakeConnection.execute_mock = execute_mock
+        FakeConnection.upload_mock = upload_mock
+        FakeConnection.download_mock = download_mock
+        return FakeConnection
+
+    def _run_execute(self, connection_cls, usernames, passwords, **kwargs):
+        """Run execute_on_host with the given fake connection class, patching CONNECTIONS."""
+        from tomoe.connections import CONNECTIONS
+
+        original_connections = CONNECTIONS.copy()
         try:
-            protocols.PROTOCOLS["mock"] = proto
+            CONNECTIONS["mock"] = connection_cls
             host_statuses = {}
             status_lock = Lock()
 
@@ -76,18 +105,18 @@ class TestExecuteOnHost:
             defaults.update(kwargs)
             return execute_on_host(**defaults)
         finally:
-            protocols.PROTOCOLS.clear()
-            protocols.PROTOCOLS.update(original_protocols)
+            CONNECTIONS.clear()
+            CONNECTIONS.update(original_connections)
 
     def test_execute_on_host_success(self):
-        proto = self._make_mock_protocol()
-        result = self._run_execute(proto, ["admin"], ["pass123"])
+        connection_cls = self._make_mock_connection_cls()
+        result = self._run_execute(connection_cls, ["admin"], ["pass123"])
 
         assert result.success is True
         assert result.host == "10.0.0.1"
         assert result.username == "admin"
         assert result.output == "output"
-        proto.execute.assert_called_once()
+        connection_cls.execute_mock.assert_called_once()
 
     def test_execute_on_host_auth_failure_rotates_credentials(self):
         """When AuthenticationError is raised, the next credential pair is tried."""
@@ -98,8 +127,8 @@ class TestExecuteOnHost:
             call_count += 1
             raise AuthenticationError("bad creds")
 
-        proto = self._make_mock_protocol(execute_side_effect=side_effect)
-        result = self._run_execute(proto, ["user1", "user2"], ["pass1", "pass2"])
+        connection_cls = self._make_mock_connection_cls(execute_side_effect=side_effect)
+        result = self._run_execute(connection_cls, ["user1", "user2"], ["pass1", "pass2"])
 
         assert result.success is False
         assert "Invalid credentials" in result.message
@@ -108,34 +137,34 @@ class TestExecuteOnHost:
 
     def test_execute_on_host_non_auth_error_stops(self):
         """A non-auth exception stops immediately without trying more credentials."""
-        proto = self._make_mock_protocol(
+        connection_cls = self._make_mock_connection_cls(
             execute_side_effect=RuntimeError("network down")
         )
-        result = self._run_execute(proto, ["user1", "user2"], ["pass1", "pass2"])
+        result = self._run_execute(connection_cls, ["user1", "user2"], ["pass1", "pass2"])
 
         assert result.success is False
         assert "network down" in result.message
         # Should have stopped after the first failure
-        proto.execute.assert_called_once()
+        connection_cls.execute_mock.assert_called_once()
 
     def test_execute_on_host_upload(self):
-        proto = self._make_mock_protocol()
+        connection_cls = self._make_mock_connection_cls()
         result = self._run_execute(
-            proto, ["admin"], ["pass"],
+            connection_cls, ["admin"], ["pass"],
             command=None, source="/tmp/file.txt", dest="/remote/file.txt",
         )
 
         assert result.success is True
         assert "uploaded" in result.message.lower() or "uploaded" in result.output.lower()
-        proto.upload.assert_called_once()
+        connection_cls.upload_mock.assert_called_once()
 
     def test_execute_on_host_download(self):
-        proto = self._make_mock_protocol()
+        connection_cls = self._make_mock_connection_cls()
         result = self._run_execute(
-            proto, ["admin"], ["pass"],
+            connection_cls, ["admin"], ["pass"],
             command=None, source="/remote/file.txt", dest="/tmp/file.txt",
             download=True,
         )
 
         assert result.success is True
-        proto.download.assert_called_once()
+        connection_cls.download_mock.assert_called_once()

@@ -1,16 +1,23 @@
-"""Integration tests for SSH protocol functions.
+"""Integration tests for the SSH connection.
 
-These tests require a running SSH server (provided by Docker in CI).
-They are skipped automatically when no SSH server is reachable.
+These tests require a running SSH server (provided by Docker in CI, on the
+port given by SSH_TEST_PORT / the ssh_host fixture). They are skipped
+automatically when no SSH server is reachable.
+
+Unlike the old raw-paramiko version of this file, these tests drive Tomoe's
+own SSHConnection end to end (connect/execute/put_file/get_file), using the
+configurable port (RunOptions.port) to target the non-standard container
+port.
 """
 
 import os
 import tempfile
 
-import paramiko
 import pytest
 
 from tomoe.common import AuthenticationError, ConnectionError, check_port_open
+from tomoe.config import Credential, RunOptions
+from tomoe.connections.ssh import SSHConnection
 
 
 def _ssh_available(host, port):
@@ -18,75 +25,61 @@ def _ssh_available(host, port):
     return check_port_open(host, port, timeout=3)
 
 
-def _connect(host, port, username, password):
-    """Create a paramiko SSH client connected to the test server."""
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(hostname=host, port=port, username=username, password=password, timeout=10)
-    return client
-
-
-def _exec(client, cmd):
-    """Run a command and return stripped stdout."""
-    _, stdout, _ = client.exec_command(cmd)
-    return stdout.read().decode("utf-8", errors="replace").strip()
+def _make_connection(host, port, username, password, **options_kwargs):
+    credential = Credential(username=username, password=password)
+    options = RunOptions(target_os="linux", port=port, **options_kwargs)
+    return SSHConnection(host, credential, options)
 
 
 @pytest.fixture
-def ssh_client(ssh_host, ssh_creds):
-    """Yield a connected paramiko SSH client, skip if server unavailable."""
+def ssh_connection(ssh_host, ssh_creds):
+    """Yield an SSHConnection targeting the test server, skip if unavailable."""
     host, port = ssh_host
     username, password = ssh_creds
     if not _ssh_available(host, port):
         pytest.skip(f"SSH server not reachable at {host}:{port}")
-    client = _connect(host, port, username, password)
-    yield client
-    client.close()
+    return _make_connection(host, port, username, password)
 
 
 @pytest.mark.integration
 class TestSSHExecute:
-    def test_ssh_execute_command(self, ssh_client):
-        output = _exec(ssh_client, "echo hello")
-        assert "hello" in output
+    def test_ssh_execute_command(self, ssh_connection):
+        result = ssh_connection.execute(command="echo hello")
+        assert "hello" in result.output
 
-    def test_ssh_execute_whoami(self, ssh_client, ssh_creds):
+    def test_ssh_execute_whoami(self, ssh_connection, ssh_creds):
         username, _ = ssh_creds
-        output = _exec(ssh_client, "whoami")
-        assert username in output
+        result = ssh_connection.execute(command="whoami")
+        assert username in result.output
 
 
 @pytest.mark.integration
 class TestSSHUploadDownload:
-    def test_ssh_upload_file(self, ssh_client, tmp_file):
+    def test_ssh_upload_file(self, ssh_connection, tmp_file):
         remote_path = "/tmp/tomoe_test_upload.txt"
-        sftp = ssh_client.open_sftp()
         try:
-            sftp.put(tmp_file, remote_path)
-            output = _exec(ssh_client, f"cat {remote_path}")
-            assert "hello from tomoe test" in output
+            output = ssh_connection.put_file(tmp_file, remote_path)
+            assert "Copied" in output
+
+            verify = ssh_connection.execute(command=f"cat {remote_path}")
+            assert "hello from tomoe test" in verify.output
         finally:
             try:
-                sftp.remove(remote_path)
+                ssh_connection.execute(command=f"rm -f {remote_path}")
             except Exception:
                 pass
-            sftp.close()
 
-    def test_ssh_download_file(self, ssh_client):
+    def test_ssh_download_file(self, ssh_connection):
         remote_path = "/tmp/tomoe_test_download.txt"
         content = "download test content"
 
-        # Create a file on the remote side
-        _exec(ssh_client, f'echo "{content}" > {remote_path}')
+        ssh_connection.execute(command=f'echo "{content}" > {remote_path}')
 
         local_fd, local_path = tempfile.mkstemp(prefix="tomoe_dl_")
         os.close(local_fd)
         try:
-            sftp = ssh_client.open_sftp()
-            try:
-                sftp.get(remote_path, local_path)
-            finally:
-                sftp.close()
+            output = ssh_connection.get_file(remote_path, local_path)
+            assert "Downloaded" in output
 
             with open(local_path, "r") as f:
                 downloaded = f.read()
@@ -94,7 +87,7 @@ class TestSSHUploadDownload:
         finally:
             os.unlink(local_path)
             try:
-                _exec(ssh_client, f"rm -f {remote_path}")
+                ssh_connection.execute(command=f"rm -f {remote_path}")
             except Exception:
                 pass
 
@@ -105,10 +98,12 @@ class TestSSHAuthFailure:
         host, port = ssh_host
         if not _ssh_available(host, port):
             pytest.skip(f"SSH server not reachable at {host}:{port}")
-        with pytest.raises(paramiko.AuthenticationException):
-            _connect(host, port, "testuser", "wrongpassword")
+        conn = _make_connection(host, port, "testuser", "wrongpassword")
+        with pytest.raises(AuthenticationError):
+            conn.execute(command="whoami")
 
     def test_ssh_connection_failure(self):
         """Connecting to a non-listening port should fail."""
-        with pytest.raises((OSError, paramiko.SSHException)):
-            _connect("localhost", 1, "testuser", "testpass123")
+        conn = _make_connection("localhost", 1, "testuser", "testpass123")
+        with pytest.raises(ConnectionError):
+            conn.execute(command="whoami")

@@ -15,7 +15,8 @@ from rich.table import Table
 from rich.text import Text
 
 from tomoe.common import AuthenticationError
-from tomoe.protocols import get_protocol
+from tomoe.config import Credential, RunOptions
+from tomoe.connections import get_connection
 
 LOG_STYLE = {
     logging.DEBUG: "dim",
@@ -138,11 +139,12 @@ def execute_on_host(
     dest: Optional[str] = None,
     download: bool = False,
     shutdown_event: Optional[Event] = None,
-    **proto_kwargs,
+    options: Optional[RunOptions] = None,
 ) -> HostResult:
     """Execute an operation on a single host, trying credential permutations until success."""
 
-    proto = get_protocol(protocol)
+    connection_cls = get_connection(protocol)
+    options = options or RunOptions(verbose=verbose)
 
     def update_status(status: str, user: str = "-", message: str = ""):
         with status_lock:
@@ -166,45 +168,33 @@ def execute_on_host(
                 return callback
 
             status_callback = make_status_callback(username)
+            credential = Credential(username=username, password=password, domain=domain)
+            conn = connection_cls(host, credential, options)
 
             try:
                 if source and dest and download:
-                    output = proto.download(
-                        host=host, username=username, password=password,
-                        domain=domain, source=source, dest=dest,
-                        verbose=verbose, status_callback=status_callback,
-                        **proto_kwargs,
-                    )
+                    output = conn.get_file(source, dest, status_callback=status_callback)
                     update_status("success", username, "File downloaded.")
                     return HostResult(
                         host=host, success=True, username=username,
                         message="File downloaded successfully.", output=output,
                     )
                 elif source and dest:
-                    output = proto.upload(
-                        host=host, username=username, password=password,
-                        domain=domain, source=source, dest=dest,
-                        verbose=verbose, status_callback=status_callback,
-                        **proto_kwargs,
-                    )
+                    output = conn.put_file(source, dest, status_callback=status_callback)
                     update_status("success", username, "File uploaded.")
                     return HostResult(
                         host=host, success=True, username=username,
                         message="File uploaded successfully.", output=output,
                     )
                 else:
-                    output = proto.execute(
-                        host=host, username=username, password=password,
-                        domain=domain, script_path=script_path, command=command,
-                        script_args=script_args, verbose=verbose,
-                        status_callback=status_callback,
-                        shutdown_event=shutdown_event,
-                        **proto_kwargs,
+                    result = conn.execute(
+                        command, script_path=script_path, script_args=script_args,
+                        status_callback=status_callback, shutdown_event=shutdown_event,
                     )
                     update_status("success", username, "Command executed.")
                     return HostResult(
                         host=host, success=True, username=username,
-                        message="Command executed successfully.", output=output,
+                        message="Command executed successfully.", output=result.output,
                     )
 
             except KeyboardInterrupt:
@@ -226,18 +216,22 @@ def execute_on_host(
     return HostResult(host=host, success=False, message="Invalid credentials.")
 
 
-def run_interactive_shell(host, usernames, passwords, domain, verbose, console) -> int:
+def run_interactive_shell(host, usernames, passwords, domain, verbose, console, protocol="winrm") -> int:
     """Try credentials against a single host; on first auth success, drop into interactive REPL."""
-    from tomoe.protocols import winrm
+    connection_cls = get_connection(protocol)
+    options = RunOptions(verbose=verbose)
+
+    if not connection_cls.SUPPORTS_INTERACTIVE:
+        console.print(f"[red]Error: {protocol} does not support interactive shells[/red]")
+        return 1
 
     for username in usernames:
         for password in passwords:
             console.print(f"[dim]Authenticating as {username}@{host}...[/dim]")
+            credential = Credential(username=username, password=password, domain=domain)
+            conn = connection_cls(host, credential, options)
             try:
-                winrm.interactive(
-                    host=host, username=username, password=password,
-                    domain=domain, verbose=verbose,
-                )
+                conn.interactive()
                 return 0
             except AuthenticationError:
                 console.print(f"[yellow]Auth failed for {username}, trying next...[/yellow]")
@@ -269,7 +263,7 @@ def run_concurrent_execution(
     download: bool = False,
     console: Console | None = None,
     show_failures: bool = False,
-    **proto_kwargs,
+    options: Optional[RunOptions] = None,
 ) -> tuple[list[HostResult], bool]:
     """Run execution concurrently across all hosts with live status display."""
 
@@ -377,7 +371,7 @@ def run_concurrent_execution(
                                 script_path, command, script_args, verbose,
                                 host_statuses, status_lock,
                                 source, worker_dest, download, stop_event,
-                                **proto_kwargs,
+                                options=options,
                             )
                             result_queue.put(result)
                     except KeyboardInterrupt:

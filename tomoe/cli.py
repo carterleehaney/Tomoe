@@ -8,6 +8,7 @@ from typing import Optional
 from rich.console import Console
 from rich.markup import escape
 
+from tomoe.config import RunOptions
 from tomoe.orchestrator import (
     run_concurrent_execution,
     run_interactive_shell,
@@ -238,16 +239,20 @@ def main():
         exit_code = run_interactive_shell(
             host=hosts[0], usernames=usernames, passwords=passwords,
             domain=args.domain, verbose=args.verbose, console=console,
+            protocol=args.protocol,
         )
         raise SystemExit(exit_code)
 
-    # Build protocol-specific kwargs from CLI args.
-    proto_kwargs = {}
-    if args.protocol == "smb":
-        proto_kwargs["shell_type"] = args.shell
-        proto_kwargs["encrypt"] = args.encrypt
-    elif args.protocol == "ssh":
-        proto_kwargs["target_os"] = args.target_os
+    # Build the RunOptions object from CLI args; this is what replaces the
+    # old ad hoc kwargs dict that used to get splatted into
+    # protocol-module calls.
+    options = RunOptions(
+        shell_type=getattr(args, "shell", "powershell"),
+        encrypt=getattr(args, "encrypt", True),
+        target_os=getattr(args, "target_os", "windows"),
+        threads=args.threads,
+        verbose=args.verbose,
+    )
 
     results, compact_mode = run_concurrent_execution(
         hosts=hosts, usernames=usernames, passwords=passwords,
@@ -256,7 +261,7 @@ def main():
         script_args=args.args, verbose=args.verbose,
         max_workers=args.threads, source=source, dest=dest,
         download=is_download, console=console,
-        show_failures=args.show_failures, **proto_kwargs,
+        show_failures=args.show_failures, options=options,
     )
 
     print_results(results, console)
