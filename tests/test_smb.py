@@ -112,7 +112,7 @@ class TestSMBAuthFailure:
         from tomoe.protocols.smb import execute
 
         host, _ = smb_host
-        with pytest.raises((AuthenticationError, Exception)):
+        with pytest.raises(AuthenticationError):
             execute(
                 host=host, username="testuser", password="wrongpassword",
                 domain="", command="whoami",

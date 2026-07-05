@@ -126,7 +126,7 @@ class TestWinRMAuthFailure:
         from tomoe.protocols.winrm import execute
 
         host, _ = winrm_host
-        with pytest.raises((AuthenticationError, Exception)):
+        with pytest.raises(AuthenticationError):
             execute(
                 host=host, username="testuser", password="wrongpassword",
                 domain="", command="whoami",
