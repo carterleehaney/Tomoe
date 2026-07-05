@@ -64,32 +64,11 @@ jobs:
           SSH_TEST_PORT: "2222"
         run: pytest tests/test_ssh.py -v
 
-  winrm-smb-integration:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Configure WinRM
-        shell: powershell
-        run: |
-          Enable-PSRemoting -Force
-          Set-Item WSMan:\localhost\Service\Auth\Basic -Value $true
-          Set-Item WSMan:\localhost\Service\AllowUnencrypted -Value $true
-          winrm set winrm/config/service '@{AllowUnencrypted="true"}'
-
-      - name: Configure SMB test user
-        shell: powershell
-        run: |
-          net user testuser TestPass123! /add
-          net localgroup Administrators testuser /add
-
-      - name: Install dependencies
-        run: pip install -e ".[test]"
-
-      - name: Run WinRM and SMB integration tests
-        run: pytest tests/test_winrm.py tests/test_smb.py -v
+  # NOTE: The WinRM/SMB integration job was removed. It ran windows-latest
+  # PSRemoting against itself (localhost), which fails on hosted runners with
+  # WSManFaultError 0x80338114 ("could not launch a host process") — the WSMan
+  # provider host cannot launch. Tomoe is a client, so protocol E2E belongs in
+  # a Linux-client -> containerized-target integration workflow (SSH via
+  # openssh, SMB file-ops via Samba), reintroduced as a non-blocking
+  # integration.yml by the ci-engineer work. Real WinRM + SMB-execute E2E needs
+  # a real Windows target (self-hosted/cloud) and must never gate hosted CI.
